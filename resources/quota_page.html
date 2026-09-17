@@ -154,7 +154,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
     });
   }
   function text(parent, value) { const node = document.createElement("span"); node.textContent = value == null || value === "" ? "-" : value; parent.appendChild(node); }
-  function renderUsage(row, usage) {
+  function renderUsage(row, usage, extraParts) {
     const value = document.createElement("div"); value.className = "quota-percent";
     const track = document.createElement("div"); track.className = "quota-track";
     const fill = document.createElement("div"); fill.className = usage.status === "exceeded" ? "quota-fill is-exceeded" : "quota-fill";
@@ -166,6 +166,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
     const parts = [usage.status || "ok"];
     if (Number(usage.cap) > 0) parts.push((Number(usage.used) || 0).toFixed(2) + " / " + Number(usage.cap).toFixed(2) + " credits");
     if (usage.resets_at) parts.push("resets " + new Date(usage.resets_at).toLocaleString());
+    (extraParts || []).forEach(part => parts.push(part));
     text(meta, parts.join(" · "));
     row.append(value, track, meta);
   }
@@ -181,12 +182,11 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
       const title = document.createElement("h2"); title.className = "credential-name"; title.textContent = labels.get(card.key_id) || card.label; header.append(badge, title); section.appendChild(header);
       if (cached) {
         const row = document.createElement("div"); row.className = "quota-row";
-        const rowHeader = document.createElement("div"); rowHeader.className = "quota-row-header"; const label = document.createElement("span"); label.className = "quota-label"; label.textContent = "Plan credits"; rowHeader.appendChild(label); row.appendChild(rowHeader);
-        const meta = document.createElement("div"); meta.className = "quota-meta";
+        const rowHeader = document.createElement("div"); rowHeader.className = "quota-row-header"; const label = document.createElement("span"); label.className = "quota-label"; label.textContent = "Monthly credits"; rowHeader.appendChild(label); row.appendChild(rowHeader);
         const left = Number(cached.credits_left) || 0;
-        const total = Number(cached.plan_credits) || 0;
-        text(meta, total > 0 ? left.toFixed(2) + " / " + total.toFixed(2) + " credits left" : left.toFixed(2) + " credits left");
-        row.appendChild(meta); section.appendChild(row);
+        const month = cached.month;
+        if (month) { renderUsage(row, month, [left.toFixed(2) + " credits left"]); } else { const meta = document.createElement("div"); meta.className = "quota-meta"; text(meta, left.toFixed(2) + " credits left (plan unknown)"); row.appendChild(meta); }
+        section.appendChild(row);
       }
       [["five_hour", "5-hour window"], ["weekly", "Weekly window"]].forEach(entry => {
         const name = entry[0];

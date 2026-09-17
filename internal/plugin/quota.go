@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -43,13 +44,18 @@ type quotaWindow struct {
 
 // quotaUsage is one credential's account snapshot.
 type quotaUsage struct {
-	Plan             string      `json:"plan,omitempty"`
-	PlanCredits      float64     `json:"plan_credits,omitempty"`
-	CreditsLeft      float64     `json:"credits_left"`
-	PurchasedCredits float64     `json:"purchased_credits,omitempty"`
-	FiveHour         quotaWindow `json:"five_hour"`
-	Weekly           quotaWindow `json:"weekly"`
-	RefreshedAt      string      `json:"refreshed_at"`
+	Plan             string  `json:"plan,omitempty"`
+	PlanCredits      float64 `json:"plan_credits,omitempty"`
+	CreditsLeft      float64 `json:"credits_left"`
+	PurchasedCredits float64 `json:"purchased_credits,omitempty"`
+	// Month is the monthly plan allowance rendered as a window so the page can
+	// meter it like the two rate-limit windows. It is absent when the plan is
+	// unknown, because CommandCode reports only the REMAINING monthly credits
+	// and a bar without a denominator would be a lie.
+	Month       *quotaWindow `json:"month,omitempty"`
+	FiveHour    quotaWindow  `json:"five_hour"`
+	Weekly      quotaWindow  `json:"weekly"`
+	RefreshedAt string       `json:"refreshed_at"`
 }
 
 type quotaCard struct {
@@ -310,6 +316,7 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 			}
 		}
 	}
+	usage.Month = monthWindow(usage.PlanCredits, usage.CreditsLeft, usage.PurchasedCredits)
 	if raw, errWho := get(accountWhoamiPath); errWho == nil {
 		var who accountWhoami
 		if json.Unmarshal(raw, &who) == nil {
@@ -320,6 +327,41 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 		}
 	}
 	return usage, label, nil
+}
+
+// monthWindow renders the monthly plan allowance as a window. CommandCode's
+// /alpha/billing/credits reports only the REMAINING monthly credits, so the
+// pool and the consumed amount are derived exactly the way the vendor CLI
+// derives its own usage bar: pool = max(allowance, remaining) + purchased,
+// consumed = pool - (remaining + purchased). A plan that is not in the table
+// has no allowance to divide by, so the window is omitted rather than reported
+// as a suspicious 0%.
+func monthWindow(planCredits, creditsLeft, purchased float64) *quotaWindow {
+	if planCredits <= 0 {
+		return nil
+	}
+	remaining := creditsLeft + purchased
+	pool := math.Max(planCredits, creditsLeft) + purchased
+	if pool <= 0 {
+		return nil
+	}
+	used := pool - remaining
+	if used < 0 {
+		used = 0
+	}
+	out := quotaWindow{Used: used, Cap: pool, Status: "ok"}
+	if remaining <= 0 {
+		out.Status = "exceeded"
+	}
+	percent := int(used / pool * 100)
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	out.Percent = percent
+	return &out
 }
 
 func windowFromAccount(w accountWindow, limited bool) quotaWindow {

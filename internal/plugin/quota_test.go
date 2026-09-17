@@ -124,6 +124,17 @@ func TestQuotaRefresh(t *testing.T) {
 	if got.Usage.RefreshedAt == "" {
 		t.Error("refreshed_at missing")
 	}
+	// The monthly allowance is derived from the plan table: pool = max(70, 51.5)
+	// + 2 purchased = 72, consumed = 72 - (51.5 + 2) = 18.5, i.e. 25%.
+	if got.Usage.Month == nil {
+		t.Fatal("monthly window missing for a known plan")
+	}
+	if got.Usage.Month.Cap != 72 || got.Usage.Month.Used != 18.5 || got.Usage.Month.Percent != 25 || got.Usage.Month.Status != "ok" {
+		t.Errorf("monthly window = %+v", *got.Usage.Month)
+	}
+	if got.Usage.Month.ResetsAt != "" {
+		t.Errorf("monthly window carries a reset time = %q", got.Usage.Month.ResetsAt)
+	}
 	for url, calls := range seen {
 		if calls != 1 {
 			t.Errorf("%s called %d times, want 1", url, calls)
@@ -207,6 +218,55 @@ func TestQuotaRefreshExhaustedAccount(t *testing.T) {
 	// rendering 1970-01-01 in the page.
 	if got.Usage.FiveHour.ResetsAt != "" {
 		t.Errorf("five-hour reset = %q, want empty", got.Usage.FiveHour.ResetsAt)
+	}
+}
+
+// The monthly row divides the plan allowance by what is left of it. CommandCode
+// reports only the REMAINING monthly credits, so the pool and the consumed
+// amount are derived the way the vendor CLI derives its own usage bar, and the
+// window is omitted entirely when the plan (and therefore the denominator) is
+// unknown.
+func TestMonthWindow(t *testing.T) {
+	cases := []struct {
+		name       string
+		plan       float64
+		left       float64
+		purchased  float64
+		wantNil    bool
+		wantUsed   float64
+		wantCap    float64
+		wantPct    int
+		wantStatus string
+	}{
+		{name: "half spent on GOAT", plan: 70, left: 35, wantUsed: 35, wantCap: 70, wantPct: 50, wantStatus: "ok"},
+		// weekly/monthly top-ups enlarge the pool without shrinking the plan.
+		{name: "purchased credits extend the pool", plan: 70, left: 51.5, purchased: 2, wantUsed: 18.5, wantCap: 72, wantPct: 25, wantStatus: "ok"},
+		{name: "fully spent plan", plan: 70, left: 0, wantUsed: 70, wantCap: 70, wantPct: 100, wantStatus: "exceeded"},
+		// A plan whose remaining credits exceed the table value (upgraded plan,
+		// stale table) must not produce a negative or >100% bar.
+		{name: "remaining above the table value", plan: 10, left: 70, wantUsed: 0, wantCap: 70, wantPct: 0, wantStatus: "ok"},
+		{name: "unknown plan has no denominator", plan: 0, left: 34.99, wantNil: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := monthWindow(tc.plan, tc.left, tc.purchased)
+			if tc.wantNil {
+				if got != nil {
+					t.Fatalf("monthWindow(%v,%v,%v) = %+v, want nil", tc.plan, tc.left, tc.purchased, *got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("monthWindow(%v,%v,%v) = nil", tc.plan, tc.left, tc.purchased)
+			}
+			if got.Used != tc.wantUsed || got.Cap != tc.wantCap || got.Percent != tc.wantPct || got.Status != tc.wantStatus {
+				t.Errorf("monthWindow(%v,%v,%v) = %+v, want used=%v cap=%v percent=%d status=%q",
+					tc.plan, tc.left, tc.purchased, *got, tc.wantUsed, tc.wantCap, tc.wantPct, tc.wantStatus)
+			}
+			if got.Percent < 0 || got.Percent > 100 || got.Used < 0 {
+				t.Errorf("monthWindow out of range: %+v", *got)
+			}
+		})
 	}
 }
 
@@ -404,6 +464,12 @@ func TestQuotaPageUsesNativeQuotaStylesAndThemeBridge(t *testing.T) {
 		".quota-fill.is-exceeded { background: var(--error-color); }",
 		`fill.className = usage.status === "exceeded" ? "quota-fill is-exceeded" : "quota-fill"`,
 		`meta.className = usage.status === "exceeded" ? "quota-meta is-exceeded" : "quota-meta"`,
+		// The monthly allowance must stay metered like the two rate-limit
+		// windows instead of degrading back to a bare text row.
+		`label.textContent = "Monthly credits"`,
+		`if (month) { renderUsage(row, month, [left.toFixed(2) + " credits left"]); }`,
+		`text(meta, left.toFixed(2) + " credits left (plan unknown)")`,
+		`function renderUsage(row, usage, extraParts) {`,
 		"repeat(auto-fill, minmax(380px, 1fr))",
 		"@media (max-width: 768px)",
 		`[data-theme="white"]`,
