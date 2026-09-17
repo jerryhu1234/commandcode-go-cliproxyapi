@@ -79,7 +79,7 @@ func TestQuotaRefresh(t *testing.T) {
 					`"weekly":{"used":18.5,"cap":35,"exceeded":false,"resetAt":1790136440498}}}`)}), nil
 		case "https://quota.test/alpha/billing/subscriptions":
 			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(
-				`{"success":true,"data":{"planId":"individual-goat","status":"active"}}`)}), nil
+				`{"success":true,"data":{"planId":"individual-goat","status":"active","currentPeriodEnd":"2026-10-16T04:03:37.000Z"}}`)}), nil
 		case "https://quota.test/alpha/whoami?limits=1":
 			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(
 				`{"success":true,"user":{"email":"dev@example.test"},"org":null}`)}), nil
@@ -132,8 +132,8 @@ func TestQuotaRefresh(t *testing.T) {
 	if got.Usage.Month.Cap != 72 || got.Usage.Month.Used != 18.5 || got.Usage.Month.Percent != 25 || got.Usage.Month.Status != "ok" {
 		t.Errorf("monthly window = %+v", *got.Usage.Month)
 	}
-	if got.Usage.Month.ResetsAt != "" {
-		t.Errorf("monthly window carries a reset time = %q", got.Usage.Month.ResetsAt)
+	if got.Usage.Month.ResetsAt != "2026-10-16T04:03:37Z" {
+		t.Errorf("monthly reset = %q, want the subscription period end", got.Usage.Month.ResetsAt)
 	}
 	for url, calls := range seen {
 		if calls != 1 {
@@ -174,7 +174,7 @@ func TestQuotaRefreshExhaustedAccount(t *testing.T) {
 					`"weekly":{"used":35.0001558585,"cap":35,"exceeded":true,"resetAt":1789721062334}}}`)}), nil
 		case "https://quota.test/alpha/billing/subscriptions":
 			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(
-				`{"success":true,"data":{"planId":"individual-goat","status":"active"}}`)}), nil
+				`{"success":true,"data":{"planId":"individual-goat","status":"active","currentPeriodEnd":"2026-10-16T04:03:37.000Z"}}`)}), nil
 		case "https://quota.test/alpha/whoami?limits=1":
 			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(
 				`{"success":true,"user":{"email":"exhausted@example.test"},"org":null}`)}), nil
@@ -219,6 +219,9 @@ func TestQuotaRefreshExhaustedAccount(t *testing.T) {
 	if got.Usage.FiveHour.ResetsAt != "" {
 		t.Errorf("five-hour reset = %q, want empty", got.Usage.FiveHour.ResetsAt)
 	}
+	if got.Usage.Month == nil || got.Usage.Month.ResetsAt != "2026-10-16T04:03:37Z" {
+		t.Errorf("monthly reset = %+v, want the subscription period end", got.Usage.Month)
+	}
 }
 
 // The monthly row divides the plan allowance by what is left of it. CommandCode
@@ -226,6 +229,25 @@ func TestQuotaRefreshExhaustedAccount(t *testing.T) {
 // amount are derived the way the vendor CLI derives its own usage bar, and the
 // window is omitted entirely when the plan (and therefore the denominator) is
 // unknown.
+func TestPeriodEndRFC3339(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "2026-10-16T04:03:37.000Z", want: "2026-10-16T04:03:37Z"},
+		{raw: "2026-10-16T04:03:37Z", want: "2026-10-16T04:03:37Z"},
+		{raw: " 2026-10-16T12:03:37+08:00 ", want: "2026-10-16T04:03:37Z"},
+		{raw: "2026-10-16", want: "2026-10-16T00:00:00Z"},
+		{raw: "", want: ""},
+		{raw: "not-a-date", want: ""},
+	}
+	for _, tc := range cases {
+		if got := periodEndRFC3339(tc.raw); got != tc.want {
+			t.Errorf("periodEndRFC3339(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
 func TestMonthWindow(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -468,6 +490,7 @@ func TestQuotaPageUsesNativeQuotaStylesAndThemeBridge(t *testing.T) {
 		// windows instead of degrading back to a bare text row.
 		`label.textContent = "Monthly credits"`,
 		`if (month) { renderUsage(row, month, [left.toFixed(2) + " credits left"]); }`,
+		`[["five_hour", "5-hour window"], ["weekly", "Weekly window"]]`,
 		`text(meta, left.toFixed(2) + " credits left (plan unknown)")`,
 		`function renderUsage(row, usage, extraParts) {`,
 		"repeat(auto-fill, minmax(380px, 1fr))",
@@ -496,6 +519,13 @@ func TestQuotaPageUsesNativeQuotaStylesAndThemeBridge(t *testing.T) {
 		if !strings.Contains(resources.QuotaPage, marker) {
 			t.Fatalf("quota page missing styling marker %q", marker)
 		}
+	}
+	page := resources.QuotaPage
+	five := strings.Index(page, `["five_hour", "5-hour window"]`)
+	weekly := strings.Index(page, `["weekly", "Weekly window"]`)
+	month := strings.Index(page, `label.textContent = "Monthly credits"`)
+	if five < 0 || weekly < five || month < weekly {
+		t.Fatalf("quota rows out of order: five=%d weekly=%d month=%d", five, weekly, month)
 	}
 	if strings.Count(resources.QuotaPage, `document.createElement("button")`) != 1 || strings.Contains(resources.QuotaPage, `textContent = "Refresh card"`) || strings.Contains(resources.QuotaPage, "quota-button") || strings.Contains(resources.QuotaPage, "quota-refresh-small") {
 		t.Fatal("quota page does not have exactly one secondary refresh button path")

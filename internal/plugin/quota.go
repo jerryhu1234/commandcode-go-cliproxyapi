@@ -49,9 +49,10 @@ type quotaUsage struct {
 	CreditsLeft      float64 `json:"credits_left"`
 	PurchasedCredits float64 `json:"purchased_credits,omitempty"`
 	// Month is the monthly plan allowance rendered as a window so the page can
-	// meter it like the two rate-limit windows. It is absent when the plan is
-	// unknown, because CommandCode reports only the REMAINING monthly credits
-	// and a bar without a denominator would be a lie.
+	// meter it like the two rate-limit windows. ResetsAt is the subscription
+	// currentPeriodEnd (the plan's renewal / expiry instant). The window is
+	// absent when the plan is unknown, because CommandCode reports only the
+	// REMAINING monthly credits and a bar without a denominator would be a lie.
 	Month       *quotaWindow `json:"month,omitempty"`
 	FiveHour    quotaWindow  `json:"five_hour"`
 	Weekly      quotaWindow  `json:"weekly"`
@@ -307,9 +308,11 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 	}
 
 	label := ""
+	periodEnd := ""
 	if raw, errSub := get(accountSubscriptionPath); errSub == nil {
 		var sub accountSubscription
 		if json.Unmarshal(raw, &sub) == nil && sub.Success {
+			periodEnd = sub.Data.CurrentPeriodEnd
 			if name, allowance := planFor(sub.Data.PlanID); name != "" {
 				usage.Plan = name
 				usage.PlanCredits = allowance
@@ -317,6 +320,9 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 		}
 	}
 	usage.Month = monthWindow(usage.PlanCredits, usage.CreditsLeft, usage.PurchasedCredits)
+	if usage.Month != nil {
+		usage.Month.ResetsAt = periodEndRFC3339(periodEnd)
+	}
 	if raw, errWho := get(accountWhoamiPath); errWho == nil {
 		var who accountWhoami
 		if json.Unmarshal(raw, &who) == nil {
@@ -362,6 +368,29 @@ func monthWindow(planCredits, creditsLeft, purchased float64) *quotaWindow {
 	}
 	out.Percent = percent
 	return &out
+}
+
+// periodEndRFC3339 turns CommandCode's subscription currentPeriodEnd into
+// the same RFC3339 UTC the rate-limit windows use. The vendor sends an ISO
+// timestamp (probed live as 2026-10-16T04:03:37.000Z); anything unparseable
+// is dropped so the page does not invent a date.
+func periodEndRFC3339(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	return ""
 }
 
 func windowFromAccount(w accountWindow, limited bool) quotaWindow {

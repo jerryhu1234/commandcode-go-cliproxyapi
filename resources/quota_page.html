@@ -180,6 +180,14 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
       const cached = values.get(card.key_id);
       const badge = document.createElement("span"); badge.className = "credential-badge"; badge.textContent = (cached && cached.plan) || "CC"; badge.setAttribute("aria-hidden", "true");
       const title = document.createElement("h2"); title.className = "credential-name"; title.textContent = labels.get(card.key_id) || card.label; header.append(badge, title); section.appendChild(header);
+      [["five_hour", "5-hour window"], ["weekly", "Weekly window"]].forEach(entry => {
+        const name = entry[0];
+        const row = document.createElement("div"); row.className = "quota-row";
+        const rowHeader = document.createElement("div"); rowHeader.className = "quota-row-header"; const label = document.createElement("span"); label.className = "quota-label"; label.textContent = entry[1]; rowHeader.appendChild(label); row.appendChild(rowHeader);
+        const usage = values.get(card.key_id) && values.get(card.key_id)[name];
+        if (usage) renderUsage(row, usage); else { const pending = document.createElement("div"); pending.className = "quota-meta"; pending.textContent = "Not refreshed"; row.appendChild(pending); }
+        section.appendChild(row);
+      });
       if (cached) {
         const row = document.createElement("div"); row.className = "quota-row";
         const rowHeader = document.createElement("div"); rowHeader.className = "quota-row-header"; const label = document.createElement("span"); label.className = "quota-label"; label.textContent = "Monthly credits"; rowHeader.appendChild(label); row.appendChild(rowHeader);
@@ -188,14 +196,6 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
         if (month) { renderUsage(row, month, [left.toFixed(2) + " credits left"]); } else { const meta = document.createElement("div"); meta.className = "quota-meta"; text(meta, left.toFixed(2) + " credits left (plan unknown)"); row.appendChild(meta); }
         section.appendChild(row);
       }
-      [["five_hour", "5-hour window"], ["weekly", "Weekly window"]].forEach(entry => {
-        const name = entry[0];
-        const row = document.createElement("div"); row.className = "quota-row";
-        const rowHeader = document.createElement("div"); rowHeader.className = "quota-row-header"; const label = document.createElement("span"); label.className = "quota-label"; label.textContent = entry[1]; rowHeader.appendChild(label); row.appendChild(rowHeader);
-       const usage = values.get(card.key_id) && values.get(card.key_id)[name];
-         if (usage) renderUsage(row, usage); else { const pending = document.createElement("div"); pending.className = "quota-meta"; pending.textContent = "Not refreshed"; row.appendChild(pending); }
-         section.appendChild(row);
-       });
       const updated = fetchedAt.get(card.key_id);
       if (updated) { const timestamp = document.createElement("div"); timestamp.className = "quota-meta"; timestamp.textContent = "Updated " + new Date(updated).toLocaleString(); section.appendChild(timestamp); }
       const actions = document.createElement("div"); actions.className = "quota-actions";
