@@ -25,7 +25,7 @@ func TestManagementRegistration(t *testing.T) {
 	if len(got.Routes) != 1 || got.Routes[0].Method != http.MethodPost || got.Routes[0].Path != "/plugins/"+pluginName+"/quota-usage" {
 		t.Fatalf("routes = %+v", got.Routes)
 	}
-	if len(got.Resources) != 1 || got.Resources[0].Path != "/quota" || got.Resources[0].Menu != "CommandCode Go Quota" {
+	if len(got.Resources) != 1 || got.Resources[0].Path != "/quota" || got.Resources[0].Menu != "CommandCode Quota" {
 		t.Fatalf("resources = %+v", got.Resources)
 	}
 	var registration registrationResult
@@ -47,7 +47,7 @@ func TestQuotaListDoesNotCallHost(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Cards) != 2 || got.Cards[0].Label != "CommandCode Go credential "+mustHashPrefix("quota-key-a") || got.Cards[1].Label != "CommandCode Go credential "+mustHashPrefix("quota-key-b") {
+	if len(got.Cards) != 2 || got.Cards[0].Label != "CommandCode credential "+mustHashPrefix("quota-key-a") || got.Cards[1].Label != "CommandCode credential "+mustHashPrefix("quota-key-b") {
 		t.Fatalf("cards = %+v", got.Cards)
 	}
 	if strings.Contains(string(resp.Body), "quota-key-") || len(f.callsOf(pluginabi.MethodHostHTTPDo)) != 0 {
@@ -164,11 +164,11 @@ func TestQuotaWindowStatuses(t *testing.T) {
 
 func TestAccountAPIBase(t *testing.T) {
 	cases := map[string]string{
-		"https://api.commandcode.ai/provider/v1":    "https://api.commandcode.ai",
-		"https://api.commandcode.ai/provider/v1/":   "https://api.commandcode.ai",
+		"https://api.commandcode.ai/provider/v1":         "https://api.commandcode.ai",
+		"https://api.commandcode.ai/provider/v1/":        "https://api.commandcode.ai",
 		"https://staging-api.commandcode.ai/provider/v1": "https://staging-api.commandcode.ai",
-		"https://api.commandcode.ai/provider":       "https://api.commandcode.ai",
-		"https://gateway.test/code/v1":              "https://gateway.test/code/v1",
+		"https://api.commandcode.ai/provider":            "https://api.commandcode.ai",
+		"https://gateway.test/code/v1":                   "https://gateway.test/code/v1",
 	}
 	for in, want := range cases {
 		got, err := AccountAPIBase(in)
@@ -215,7 +215,7 @@ func TestQuotaUnknownKeyAndResource(t *testing.T) {
 		t.Fatalf("unknown response = %+v err=%v calls=%v", resp, err, f.callsOf(pluginabi.MethodHostHTTPDo))
 	}
 	resource, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodGet, Path: "/v0/resource/plugins/" + pluginName + "/quota"})
-	if err != nil || resource.StatusCode != 0 || resource.Headers.Get("Content-Type") != "text/html; charset=utf-8" || !strings.Contains(string(resource.Body), "CommandCode Go Quota") || strings.Contains(string(resource.Body), key) {
+	if err != nil || resource.StatusCode != 0 || resource.Headers.Get("Content-Type") != "text/html; charset=utf-8" || !strings.Contains(string(resource.Body), "CommandCode Quota") || strings.Contains(string(resource.Body), key) {
 		t.Fatalf("resource response = %+v err=%v", resource, err)
 	}
 }
@@ -264,7 +264,7 @@ func TestQuotaErrorsAreRedacted(t *testing.T) {
 			if got.Error == "" || got.Usage != nil {
 				t.Fatalf("card = %+v, want an error and no usage", got)
 			}
-			if got.Label != "CommandCode Go credential "+mustHashPrefix(key) {
+			if got.Label != "CommandCode credential "+mustHashPrefix(key) {
 				t.Errorf("label = %q, want the credential fallback label", got.Label)
 			}
 		})
@@ -364,5 +364,5 @@ func TestQuotaPageUsesNativeQuotaStylesAndThemeBridge(t *testing.T) {
 
 func mustHashPrefix(key string) string {
 	_, label := quotaIdentity(key)
-	return strings.TrimPrefix(label, "CommandCode Go credential ")
+	return strings.TrimPrefix(label, "CommandCode credential ")
 }

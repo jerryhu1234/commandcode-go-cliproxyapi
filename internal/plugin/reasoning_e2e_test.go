@@ -35,8 +35,8 @@ func TestE2EReasoningToResponsesClient(t *testing.T) {
 	m, f, st, _ := newIntegrationManager(t)
 	st.setChatFrames(reasoningChatFrames)
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBodyForKey("commandcode-go/glm-5.2", "openai-response",
-			[]byte(`{"model":"commandcode-go/glm-5.2","input":"hi","stream":true}`), "down-reason", "sk-test-1"))
+		execStreamReqBodyForKey("commandcode/glm-5.2", "openai-response",
+			[]byte(`{"model":"commandcode/glm-5.2","input":"hi","stream":true}`), "down-reason", "sk-test-1"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -83,8 +83,8 @@ func TestE2EReasoningToClaudeClient(t *testing.T) {
 	m, f, st, _ := newIntegrationManager(t)
 	st.setChatFrames(reasoningChatFrames)
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBodyForKey("commandcode-go/glm-5.2", "claude",
-			[]byte(`{"model":"commandcode-go/glm-5.2","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`), "down-think", "sk-test-1"))
+		execStreamReqBodyForKey("commandcode/glm-5.2", "claude",
+			[]byte(`{"model":"commandcode/glm-5.2","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`), "down-think", "sk-test-1"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -121,8 +121,8 @@ func TestE2EReasoningToOpenAIClient(t *testing.T) {
 	m, f, st, _ := newIntegrationManager(t)
 	st.setChatFrames(reasoningChatFrames)
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBodyForKey("commandcode-go/glm-5.2", "openai",
-			[]byte(`{"model":"commandcode-go/glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`), "down-cc", "sk-test-1"))
+		execStreamReqBodyForKey("commandcode/glm-5.2", "openai",
+			[]byte(`{"model":"commandcode/glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`), "down-cc", "sk-test-1"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestE2EReasoningToOpenAIClient(t *testing.T) {
 // TestE2EReasoningNonStream covers the non-stream legs for all three client
 // formats off one upstream body.
 func TestE2EReasoningNonStream(t *testing.T) {
-	ccBody := []byte(`{"model":"commandcode-go/glm-5.2","messages":[{"role":"user","content":"hi"}]}`)
+	ccBody := []byte(`{"model":"commandcode/glm-5.2","messages":[{"role":"user","content":"hi"}]}`)
 	cases := []struct {
 		name   string
 		format string
@@ -193,7 +193,7 @@ func TestE2EReasoningNonStream(t *testing.T) {
 			m, _, st, _ := newIntegrationManager(t)
 			st.setChatBody(reasoningCompletion)
 			var out pluginapi.ExecutorResponse
-			decodeResult(t, mustHandle(t, m, "executor.execute", execReqBody("commandcode-go/glm-5.2", tc.format, ccBody, false)), &out)
+			decodeResult(t, mustHandle(t, m, "executor.execute", execReqBody("commandcode/glm-5.2", tc.format, ccBody, false)), &out)
 			var result map[string]any
 			if err := json.Unmarshal(out.Payload, &result); err != nil {
 				t.Fatalf("decode result: %v (%s)", err, out.Payload)

@@ -31,7 +31,7 @@ func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	if c.CatalogURL != "https://api.commandcode.ai/provider/v1/models" {
 		t.Errorf("CatalogURL = %q", c.CatalogURL)
 	}
-	if !c.ModelPrefix.Enabled || c.ModelPrefix.Value != "commandcode-go" {
+	if !c.ModelPrefix.Enabled || c.ModelPrefix.Value != "commandcode" {
 		t.Errorf("ModelPrefix = %+v", c.ModelPrefix)
 	}
 	if len(c.APIKeys) != 1 || c.APIKeys[0].Value != "sk-dummy" {
@@ -191,8 +191,8 @@ model-prefix:
 }
 
 func TestPublicID(t *testing.T) {
-	enabled := Config{ModelPrefix: ModelPrefix{Enabled: true, Value: "commandcode-go"}}
-	if got := PublicID(enabled, "glm-5.2"); got != "commandcode-go/glm-5.2" {
+	enabled := Config{ModelPrefix: ModelPrefix{Enabled: true, Value: "commandcode"}}
+	if got := PublicID(enabled, "glm-5.2"); got != "commandcode/glm-5.2" {
 		t.Errorf("PublicID(enabled) = %q", got)
 	}
 	disabled := Config{ModelPrefix: ModelPrefix{Enabled: false}}

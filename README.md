@@ -1,14 +1,14 @@
-# CommandCode Go CLIProxyAPI Plugin
+# CommandCode Go/GOAT/Pro/Max CLIProxyAPI Plugin
 
 **English** | [简体中文](README.zh-CN.md)
 
-A native dynamic Go plugin for [CLIProxyAPI](https://help.router-for.me/plugin/development) that exposes a **CommandCode Go** plan as a single provider (`commandcode-go`).
+A native dynamic Go plugin for [CLIProxyAPI](https://help.router-for.me/plugin/development) that exposes a **CommandCode Go/GOAT/Pro/Max** plan as a single provider (`commandcode-go`; published model ids carry the `commandcode/` prefix).
 
 The plugin owns model discovery, protocol translation, execution, key scheduling, and a quota page for the CommandCode account surface, so one API-key pool serves OpenAI, Anthropic, and Responses clients through CLIProxyAPI.
 
 ## What the upstream actually serves
 
-CommandCode Go is reached through its OpenAI-compatible provider surface:
+CommandCode Go/GOAT/Pro/Max is reached through its OpenAI-compatible provider surface:
 
 | Upstream route | Status |
 |---|---|
@@ -23,7 +23,7 @@ Because there is exactly one usable route for the catalog, **every model discove
 
 ## The Problem
 
-Without this plugin, using a CommandCode Go plan in CLIProxyAPI requires hand-written provider blocks per protocol family, and the pieces that CLI clients depend on are missing or wrong:
+Without this plugin, using a CommandCode Go/GOAT/Pro/Max plan in CLIProxyAPI requires hand-written provider blocks per protocol family, and the pieces that CLI clients depend on are missing or wrong:
 
 - **Duplicated configuration & keys**: the same keys must be configured in several provider blocks.
 - **Fragmented scheduling**: rotation, rate limits, and cooldowns cannot be shared, and the Management Center cannot show per-key usage.
@@ -34,19 +34,20 @@ Without this plugin, using a CommandCode Go plan in CLIProxyAPI requires hand-wr
 ## The Solution
 
 - **Unified auth pool**: the plugin registers each configured key as a CLIProxyAPI auth record, so the host's scheduler handles rotation, retries, error cooldowns, session affinity, and per-key statistics.
-- **Transparent translation & routing**: clients ask for `commandcode-go/<upstream-id>` and never need to know the upstream protocol.
+- **Transparent translation & routing**: clients ask for `commandcode/<upstream-id>` and never need to know the upstream protocol.
 - **Reasoning fidelity**: upstream thinking text is preserved for all three client formats, and `reasoning_effort` is forwarded verbatim when the model declares no capability.
-- **One model catalog**: everything published by `{base-url}/models` is discoverable under the `commandcode-go/` prefix in `/v1/models`.
+- **One model catalog**: everything published by `{base-url}/models` is discoverable under the `commandcode/` prefix in `/v1/models`.
 
 ## Features
 
-- **Single Provider Namespace**: models appear as `commandcode-go/deepseek/deepseek-v4.1-flash`, `commandcode-go/z-ai/glm-5.3-flash`, … (prefix configurable, can be disabled for bare upstream ids).
+- **Single Provider Namespace**: models appear as `commandcode/deepseek/deepseek-v4.1-flash`, `commandcode/z-ai/glm-5.3-flash`, … (prefix configurable, can be disabled for bare upstream ids).
 - **Multi-Protocol Client Translation**: OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses requests all become upstream chat-completions calls, and responses are converted back — including streaming.
 - **Reasoning Preservation**: upstream `reasoning`, `reasoning_details[].text`, and `reasoning_content` are normalized across targets:
   - Claude clients get a leading `thinking` block with `thinking_delta` events;
   - Responses clients get a leading `reasoning` output item with `response.reasoning_summary_*` events;
   - OpenAI clients get `reasoning_content` backfilled onto each chunk while the vendor fields stay intact.
-- **Capability-aware Reasoning Controls**: an explicit `route-overrides` declaration (or catalog thinking metadata) re-enables eager validation and clamping; with nothing declared, the client's `reasoning_effort` is forwarded verbatim (`auto`/`none` omit the field) and the upstream is the authority.- **Dynamic Catalog Discovery**: remote catalog with local fallback, deduplication, and diagnostics for what was excluded.
+- **Capability-aware Reasoning Controls**: an explicit `route-overrides` declaration (or catalog thinking metadata) re-enables eager validation and clamping; with nothing declared, the client's `reasoning_effort` is forwarded verbatim (`auto`/`none` omit the field) and the upstream is the authority.
+- **Dynamic Catalog Discovery**: remote catalog with local fallback, deduplication, and diagnostics for what was excluded.
 - **CommandCode Quota Page**: a Management Center page listing every configured credential with its account email, plan, remaining plan credits, and the rolling 5-hour/weekly windows (used, cap, reset time), refreshed per card on demand.
 - **Multi-Key Auth Scheduling**: one key pool shared across all protocols through CLIProxyAPI's native scheduler.
 
@@ -86,8 +87,8 @@ plugins:
 
       # Client-facing model id prefix
       model-prefix:
-        enabled: true              # true -> "commandcode-go/<model>" (default: true)
-        value: "commandcode-go"
+        enabled: true              # true -> "commandcode/<model>" (default: true)
+        value: "commandcode"
 
       # CommandCode API keys (at least one required); supports ${ENV_VAR}
       api-keys:
@@ -125,7 +126,7 @@ plugins:
 | `base-url` | `string` | `https://api.commandcode.ai/provider/v1` | Upstream provider base URL. Valid HTTPS (or HTTP with `allow-http: true`), no query, fragment, or userinfo. |
 | `catalog-url` | `string` | `{base-url}/models` | Catalog discovery URL. |
 | `model-prefix.enabled` | `bool` | `true` | Client-facing ids use `<prefix>/<model>`; `false` publishes bare upstream ids. |
-| `model-prefix.value` | `string` | `commandcode-go` | Provider prefix. |
+| `model-prefix.value` | `string` | `commandcode` | Provider prefix. |
 | `catalog.refresh-interval` | `duration` | `15m` | Catalog polling cadence (minimum `1m`). |
 | `catalog.stale-while-unavailable` | `bool` | `true` | Keep serving the last good snapshot when a refresh fails. |
 | `protocols.*` | `bool` | `true` | Route kill switches. A disabled protocol excludes its models with a diagnostic. |
@@ -135,7 +136,7 @@ plugins:
 | `allow-http` | `bool` | `false` | Permit `http://` upstreams for local testing. |
 
 ### Quota page
-The `CommandCode Go Quota` page (Management Center → plugins) reads the account surface on the same authority as `base-url`:
+The `CommandCode Quota` page (Management Center → plugins) reads the account surface on the same authority as `base-url`:
 
 | Endpoint | Purpose |
 |---|---|
@@ -168,3 +169,7 @@ go vet ./...         # vetting
 This plugin is derived from [opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi) (v0.1.7): the adapter kernel, catalog, config, auth, and quota scaffolding come from there, and the CommandCode-specific behaviour — reasoning preservation, unattributed-capability effort passthrough, the chat-completions-only route default, and the account API used by the quota page — was adapted on top.
 
 Repository: <https://github.com/mczhoucn/commandcode-go-cliproxyapi>
+
+## License
+
+[MIT](LICENSE)

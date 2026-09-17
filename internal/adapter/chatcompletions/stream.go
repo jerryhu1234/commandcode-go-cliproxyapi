@@ -67,10 +67,10 @@ type streamTool struct {
 // SSE into sourceFormat's stream shape.
 func NewStreamConverter(sourceFormat string) *StreamConverter {
 	return &StreamConverter{
-		sourceFormat:  sourceFormat,
-		msgIndex:      -1,
-		thinkIndexIn:  -1,
-		tools:         map[int64]*streamTool{},
+		sourceFormat: sourceFormat,
+		msgIndex:     -1,
+		thinkIndexIn: -1,
+		tools:        map[int64]*streamTool{},
 	}
 }
 

@@ -11,7 +11,7 @@ var benchPayload = map[string]any{
 	"id":      "chatcmpl-20260825120000",
 	"object":  "chat.completion.chunk",
 	"created": 1770000000,
-	"model":   "commandcode-go/gpt-5.6-luna",
+	"model":   "commandcode/gpt-5.6-luna",
 	"choices": []any{map[string]any{
 		"index":         0,
 		"delta":         map[string]any{"content": "The quick brown fox jumps over the lazy dog."},

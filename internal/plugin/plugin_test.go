@@ -34,8 +34,8 @@ const (
 	testRouteOverrides = "route-overrides:\n" +
 		"  minimax-m3:\n    protocol: messages\n    endpoint: /v1/messages\n" +
 		"  gpt-5.6-luna:\n    protocol: responses\n    endpoint: /v1/responses\n"
-	dummyKey        = "sk-test"
-	dummyKeyYAML    = "api-keys:\n  - value: " + dummyKey + "\n"
+	dummyKey     = "sk-test"
+	dummyKeyYAML = "api-keys:\n  - value: " + dummyKey + "\n"
 )
 
 type capturedCall struct {
@@ -465,7 +465,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 		t.Fatalf("static = %+v", static)
 	}
 	got := static.Models[0]
-	if got.ID != "commandcode-go/glm-5.3" || got.Object != "model" || got.OwnedBy != ProviderID ||
+	if got.ID != "commandcode/glm-5.3" || got.Object != "model" || got.OwnedBy != ProviderID ||
 		got.DisplayName != "glm-5.3" || got.ContextLength != 0 || got.MaxCompletionTokens != 0 ||
 		len(got.SupportedInputModalities) != 0 || len(got.SupportedOutputModalities) != 0 {
 		t.Fatalf("model info = %+v", got)
@@ -511,7 +511,7 @@ func TestLifecycleMaterializesDeterministicAuthRecords(t *testing.T) {
 		}
 		hash := sha256.Sum256([]byte(record.APIKey))
 		wantHash := hex.EncodeToString(hash[:])
-		if record.Type != ProviderID || record.ID != "commandcode-go-key-"+wantHash || record.Label != "CommandCode Go credential "+wantHash || wire.Name != record.ID+".json" {
+		if record.Type != ProviderID || record.ID != "commandcode-go-key-"+wantHash || record.Label != "CommandCode credential "+wantHash || wire.Name != record.ID+".json" {
 			t.Fatalf("record identity = %+v name=%q", record, wire.Name)
 		}
 		if record.APIKey == "" || strings.Contains(wire.Name, record.APIKey) || strings.Contains(record.ID, record.APIKey) {
@@ -637,7 +637,7 @@ func TestRegisterIgnoresInjectedHostKeys(t *testing.T) {
 	}
 	var static pluginapi.ModelResponse
 	decodeResult(t, mustHandle(t, m, "model.static", nil), &static)
-	if len(static.Models) != 1 || static.Models[0].ID != "commandcode-go/glm-5.3" {
+	if len(static.Models) != 1 || static.Models[0].ID != "commandcode/glm-5.3" {
 		t.Fatalf("models = %+v", static.Models)
 	}
 }
@@ -1017,13 +1017,13 @@ func TestReconfigureFailedRefreshServesViaTicks(t *testing.T) {
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	assertStaticModel(t, m, "commandcode-go/glm-5.3")
+	assertStaticModel(t, m, "commandcode/glm-5.3")
 	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("reconfigure: %v", err)
 	}
-	assertStaticModel(t, m, "commandcode-go/glm-5.3")
+	assertStaticModel(t, m, "commandcode/glm-5.3")
 	manualTick(t, m)
-	assertStaticModel(t, m, "commandcode-go/minimax-m3")
+	assertStaticModel(t, m, "commandcode/minimax-m3")
 }
 
 // TestShutdownAbortsInFlightTickRefresh pins the F4 fix: a tick's refresh
@@ -1133,7 +1133,7 @@ func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	assertStaticModel(t, m, "commandcode-go/glm-5.3")
+	assertStaticModel(t, m, "commandcode/glm-5.3")
 
 	newBaseYAML := testValidYAML + "base-url: https://mirror.test/api\n"
 	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(newBaseYAML)); err != nil {
@@ -1143,12 +1143,12 @@ func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 
 	// Carried-over last-good model stays visible between the failed
 	// reconfigure refresh and the next successful refresh.
-	assertStaticModel(t, m, "commandcode-go/glm-5.3")
+	assertStaticModel(t, m, "commandcode/glm-5.3")
 
 	// Validated configs floor refresh-interval at 1m; run the tick body
 	// directly over the served state instead of waiting for the loop.
 	manualTick(t, m)
-	assertStaticModel(t, m, "commandcode-go/minimax-m3")
+	assertStaticModel(t, m, "commandcode/minimax-m3")
 }
 
 // TestReconfigureFailedRefreshHonorsStalePolicy pins the seed-gate fix: on a
@@ -1192,7 +1192,7 @@ func TestReconfigureFailedRefreshHonorsStalePolicy(t *testing.T) {
 			if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 				t.Fatalf("register: %v", err)
 			}
-			assertStaticModel(t, m, "commandcode-go/glm-5.3")
+			assertStaticModel(t, m, "commandcode/glm-5.3")
 
 			if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(testValidYAML+tc.policyYAML)); err != nil {
 				t.Fatalf("reconfigure: %v", err)
@@ -1201,7 +1201,7 @@ func TestReconfigureFailedRefreshHonorsStalePolicy(t *testing.T) {
 			var static pluginapi.ModelResponse
 			decodeResult(t, mustHandle(t, m, "model.static", nil), &static)
 			got := len(static.Models)
-			if tc.wantImmediate && (got != 1 || static.Models[0].ID != "commandcode-go/glm-5.3") {
+			if tc.wantImmediate && (got != 1 || static.Models[0].ID != "commandcode/glm-5.3") {
 				t.Fatalf("carryover models = %+v, want glm-5.3", static.Models)
 			}
 			if !tc.wantImmediate && got != 0 {
@@ -1211,7 +1211,7 @@ func TestReconfigureFailedRefreshHonorsStalePolicy(t *testing.T) {
 			// Both policies recover via the next successful tick against the
 			// NEW manager/config.
 			manualTick(t, m)
-			assertStaticModel(t, m, "commandcode-go/minimax-m3")
+			assertStaticModel(t, m, "commandcode/minimax-m3")
 		})
 	}
 }

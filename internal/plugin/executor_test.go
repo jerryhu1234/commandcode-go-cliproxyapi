@@ -266,9 +266,9 @@ func TestExecutorSessionHeaderMatrix(t *testing.T) {
 		model string
 		auth  string
 	}{
-		{"chat", "commandcode-go/glm-5.3", "Bearer " + testKey},
-		{"messages", "commandcode-go/minimax-m3", ""},
-		{"responses", "commandcode-go/gpt-5.6-luna", "Bearer " + testKey},
+		{"chat", "commandcode/glm-5.3", "Bearer " + testKey},
+		{"messages", "commandcode/minimax-m3", ""},
+		{"responses", "commandcode/gpt-5.6-luna", "Bearer " + testKey},
 	}
 	const wantSession = "6e00cd562cc2d88e238dfb81d9439de7ec843ee9d0c9879d549cb1436786f975"
 	for _, mode := range []string{"non-stream", "stream"} {
@@ -307,13 +307,13 @@ func TestExecutorSessionFallbackAndMalformedInput(t *testing.T) {
 		body := []byte(`{"messages":[{"role":"assistant","content":"prefill"}]}`)
 
 		m, f := newExecManager(t)
-		if env := mustExecute(t, m, "commandcode-go/glm-5.3", "openai", body); !env.OK {
+		if env := mustExecute(t, m, "commandcode/glm-5.3", "openai", body); !env.OK {
 			t.Fatalf("non-stream envelope = %+v", env.Error)
 		}
 		assertSessionHeaders(t, lastWire(t, f, pluginabi.MethodHostHTTPDo), emptyCommandCodeSessionID, "Bearer "+testKey)
 
 		m, f = newStreamManager(t, streamScript{upstreamID: "fallback-up"})
-		resp, err := m.HandleCall("executor.execute_stream", execStreamReqBody("commandcode-go/glm-5.3", "openai", body, "fallback-down"))
+		resp, err := m.HandleCall("executor.execute_stream", execStreamReqBody("commandcode/glm-5.3", "openai", body, "fallback-down"))
 		if err != nil || !decodeEnv(t, resp).OK {
 			t.Fatalf("stream envelope = %v %s", err, resp)
 		}
@@ -331,9 +331,9 @@ func TestExecutorSessionFallbackAndMalformedInput(t *testing.T) {
 			var resp []byte
 			var err error
 			if stream {
-				resp, err = m.HandleCall("executor.execute_stream", execStreamReqBody("commandcode-go/glm-5.3", "openai", []byte(`{"messages":`), "bad-down"))
+				resp, err = m.HandleCall("executor.execute_stream", execStreamReqBody("commandcode/glm-5.3", "openai", []byte(`{"messages":`), "bad-down"))
 			} else {
-				resp, err = m.HandleCall("executor.execute", execReqBody("commandcode-go/glm-5.3", "openai", []byte(`{"messages":`), false))
+				resp, err = m.HandleCall("executor.execute", execReqBody("commandcode/glm-5.3", "openai", []byte(`{"messages":`), false))
 			}
 			if err != nil {
 				t.Fatalf("handle: %v", err)
@@ -353,14 +353,14 @@ func TestExecutorSessionInputsPropagateInBothModes(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"session"}]}`)
 
 	m, f := newExecManager(t)
-	resp, err := m.HandleCall("executor.execute", execReqBodyWithSessionInputs("commandcode-go/glm-5.3", "openai", body, false, testKey, "canonical-non-stream", "header-non-stream"))
+	resp, err := m.HandleCall("executor.execute", execReqBodyWithSessionInputs("commandcode/glm-5.3", "openai", body, false, testKey, "canonical-non-stream", "header-non-stream"))
 	if err != nil || !decodeEnv(t, resp).OK {
 		t.Fatalf("non-stream execute: %v %s", err, resp)
 	}
 	assertSessionHeaders(t, lastWire(t, f, pluginabi.MethodHostHTTPDo), "canonical-non-stream", "Bearer "+testKey)
 
 	m, f = newStreamManager(t, streamScript{upstreamID: "session-up"})
-	resp, err = m.HandleCall("executor.execute_stream", execReqBodyWithSessionInputs("commandcode-go/glm-5.3", "openai", body, true, testKey, "", "header-stream"))
+	resp, err = m.HandleCall("executor.execute_stream", execReqBodyWithSessionInputs("commandcode/glm-5.3", "openai", body, true, testKey, "", "header-stream"))
 	if err != nil || !decodeEnv(t, resp).OK {
 		t.Fatalf("stream execute: %v %s", err, resp)
 	}
@@ -381,7 +381,7 @@ func TestExecuteChatRoute(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 
-	env := mustExecute(t, m, "commandcode-go/glm-5.3", "openai", []byte(ccRequestBody))
+	env := mustExecute(t, m, "commandcode/glm-5.3", "openai", []byte(ccRequestBody))
 	if !env.OK || env.Error != nil {
 		t.Fatalf("execute envelope error: %+v", env.Error)
 	}
@@ -423,7 +423,7 @@ func TestExecuteChatRoute(t *testing.T) {
 
 func TestExecuteUnknownModelIs404Envelope(t *testing.T) {
 	m, _ := newExecManager(t)
-	env := mustExecute(t, m, "commandcode-go/nope", "openai", []byte(ccRequestBody))
+	env := mustExecute(t, m, "commandcode/nope", "openai", []byte(ccRequestBody))
 	if env.OK || env.Error == nil || env.Error.Code != "invalid_model" || env.Error.HTTPStatus != http.StatusNotFound {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -431,7 +431,7 @@ func TestExecuteUnknownModelIs404Envelope(t *testing.T) {
 
 func TestExecuteUnsupportedSourceFormat(t *testing.T) {
 	m, _ := newExecManager(t)
-	env := mustExecute(t, m, "commandcode-go/glm-5.3", "bogus-format", []byte(ccRequestBody))
+	env := mustExecute(t, m, "commandcode/glm-5.3", "bogus-format", []byte(ccRequestBody))
 	if env.OK || env.Error == nil || env.Error.Code != string(errclass.ClassUnsupported) {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -439,7 +439,7 @@ func TestExecuteUnsupportedSourceFormat(t *testing.T) {
 
 func TestExecuteMessagesRouteNativeClaudePassesThrough(t *testing.T) {
 	m, f := newExecManager(t)
-	env := mustExecute(t, m, "commandcode-go/minimax-m3", "claude", []byte(claudeRequestBody))
+	env := mustExecute(t, m, "commandcode/minimax-m3", "claude", []byte(claudeRequestBody))
 	if !env.OK {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -495,7 +495,7 @@ func TestExecuteMessagesUpstreamStatusClassified(t *testing.T) {
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML+testRouteOverrides)); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	env := mustExecute(t, m, "commandcode-go/minimax-m3", "claude", []byte(claudeRequestBody))
+	env := mustExecute(t, m, "commandcode/minimax-m3", "claude", []byte(claudeRequestBody))
 	if env.OK || env.Error == nil || env.Error.Code != string(errclass.ClassUpstream) || !env.Error.Retryable {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -530,7 +530,7 @@ func TestExecuteResponsesRouteNativePassesThrough(t *testing.T) {
 func TestExecuteStreamRoutedFromBothMethods(t *testing.T) {
 	t.Run("from execute with stream flag", func(t *testing.T) {
 		m, f := newStreamManager(t, streamScript{startStatus: http.StatusTooManyRequests})
-		resp, err := m.HandleCall("executor.execute", execReqBody("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), true))
+		resp, err := m.HandleCall("executor.execute", execReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), true))
 		if err != nil {
 			t.Fatalf("execute(stream flag): %v", err)
 		}
@@ -551,7 +551,7 @@ func TestExecuteStreamRoutedFromBothMethods(t *testing.T) {
 	})
 	t.Run("from execute_stream", func(t *testing.T) {
 		m, _ := newStreamManager(t, streamScript{startStatus: http.StatusTooManyRequests})
-		resp, err := m.HandleCall("executor.execute_stream", execStreamReqBody("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), "down-1"))
+		resp, err := m.HandleCall("executor.execute_stream", execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-1"))
 		if err != nil {
 			t.Fatalf("execute_stream: %v", err)
 		}
@@ -573,7 +573,7 @@ func TestExecuteStreamRoutedFromBothMethods(t *testing.T) {
 	t.Run("unsupported source format", func(t *testing.T) {
 		m, _ := newStreamManager(t, streamScript{})
 		resp, err := m.HandleCall("executor.execute_stream",
-			execStreamReqBody("commandcode-go/glm-5.3", "bogus-format", []byte(ccRequestBody), "down-1"))
+			execStreamReqBody("commandcode/glm-5.3", "bogus-format", []byte(ccRequestBody), "down-1"))
 		if err != nil {
 			t.Fatalf("execute_stream bad format: %v", err)
 		}
@@ -593,7 +593,7 @@ func TestExecuteStreamHappyPathClaudeSource(t *testing.T) {
 		},
 	})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -652,7 +652,7 @@ func TestExecuteStreamCleanCloseWithoutTerminalFrame(t *testing.T) {
 		},
 	})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -682,7 +682,7 @@ func TestExecuteStreamCloseAfterFinishFlushesTerminal(t *testing.T) {
 		},
 	})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-f5"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-f5"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -742,7 +742,7 @@ func TestExecuteStreamFlushEmitFailureFailsStream(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-f5x"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-f5x"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -765,7 +765,7 @@ func TestExecuteStream4xxClosesUpstreamEntry(t *testing.T) {
 	// must be closed before the classified error is returned.
 	m, f := newStreamManager(t, streamScript{startStatus: http.StatusUnauthorized, upstreamID: "up-4xx"})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -787,7 +787,7 @@ func TestExecuteStreamOpenTransportError(t *testing.T) {
 	// lifecycle to clean up.
 	m, f := newStreamManager(t, streamScript{startErr: errors.New("connection refused")})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -812,7 +812,7 @@ func TestExecuteStreamMessagesRouteNative(t *testing.T) {
 		},
 	})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/minimax-m3", "claude", []byte(claudeRequestBody), "down-9"))
+		execStreamReqBody("commandcode/minimax-m3", "claude", []byte(claudeRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -880,7 +880,7 @@ func TestExecuteStreamEmitFailsMidstream(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -906,7 +906,7 @@ func TestExecuteStreamPartialLineDroppedOnCleanClose(t *testing.T) {
 		frames:     []string{"data: {truncated"},
 	})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -940,7 +940,7 @@ func TestExecuteStreamExceedsMaxResponseBytes(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.4", "openai", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.4", "openai", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -987,7 +987,7 @@ func TestExecuteStreamWatchdogClosesIdleUpstream(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.4", "openai", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.4", "openai", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -1012,7 +1012,7 @@ func TestExecuteStreamReadTransportError(t *testing.T) {
 		readErr:    errors.New("pipe broke"),
 	})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -1061,7 +1061,7 @@ func TestExecuteStreamPanicStillClosesStreams(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), "down-p"))
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-p"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -1085,7 +1085,7 @@ func TestExecuteStreamPanicStillClosesStreams(t *testing.T) {
 func TestExecuteStreamUpstreamErrorLabel(t *testing.T) {
 	m, f := newStreamManager(t, streamScript{upstreamID: "up-3", readErrorMsg: "upstream exploded"})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -1106,7 +1106,7 @@ func TestExecuteStreamConverterError(t *testing.T) {
 		frames:     []string{"data: {definitely not json\n\n"},
 	})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -1136,7 +1136,7 @@ func TestExecuteStreamChunkErrorAfterEmitNotRetryable(t *testing.T) {
 		},
 	})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-f1"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-f1"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -1160,7 +1160,7 @@ func TestExecuteStreamChunkErrorBeforeEmitPreservesRetryable(t *testing.T) {
 		},
 	})
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-f1"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-f1"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -1268,7 +1268,7 @@ func TestExecuteMaxResponseBytesGuard(t *testing.T) {
 		lifecycleRequestBody(testValidYAML+"max-response-bytes: 100\n")); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	env := mustExecute(t, m, "commandcode-go/glm-5.4", "openai", []byte(ccRequestBody))
+	env := mustExecute(t, m, "commandcode/glm-5.4", "openai", []byte(ccRequestBody))
 	if env.OK || env.Error == nil || env.Error.Code != string(errclass.ClassTranslation) {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -1290,7 +1290,7 @@ func TestExecuteTransportErrorClassified(t *testing.T) {
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	env := mustExecute(t, m, "commandcode-go/glm-5.3", "openai", []byte(ccRequestBody))
+	env := mustExecute(t, m, "commandcode/glm-5.3", "openai", []byte(ccRequestBody))
 	if env.OK || env.Error == nil || env.Error.Code != string(errclass.ClassNetwork) {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -1355,7 +1355,7 @@ func TestExecuteMalformedUpstreamStatusUsesSelectedKey(t *testing.T) {
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	env := mustExecute(t, m, "commandcode-go/glm-5.3", "openai", []byte(ccRequestBody))
+	env := mustExecute(t, m, "commandcode/glm-5.3", "openai", []byte(ccRequestBody))
 	if env.OK || env.Error == nil || env.Error.Code != "unsupported_protocol_or_parameter" || env.Error.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -1384,7 +1384,7 @@ func TestExecuteStreamMidStreamFailureNoRetry(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-9"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -1409,7 +1409,7 @@ func TestExecuteInvalidAuthRejection(t *testing.T) {
 		req := executorRequest{
 			ExecutorRequest: pluginapi.ExecutorRequest{
 				AuthProvider: "wrong-provider", AuthAttributes: map[string]string{"api_key": testKey},
-				Model: "commandcode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody),
+				Model: "commandcode/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody),
 			},
 		}
 		b, _ := json.Marshal(req)
@@ -1427,7 +1427,7 @@ func TestExecuteInvalidAuthRejection(t *testing.T) {
 		req := executorRequest{
 			ExecutorRequest: pluginapi.ExecutorRequest{
 				AuthProvider: ProviderID, AuthAttributes: map[string]string{"api_key": "   "},
-				Model: "commandcode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody),
+				Model: "commandcode/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody),
 			},
 		}
 		b, _ := json.Marshal(req)
@@ -1449,7 +1449,7 @@ func TestExecuteStreamInvalidAuthRejection(t *testing.T) {
 		req := executorRequest{
 			ExecutorRequest: pluginapi.ExecutorRequest{
 				AuthProvider: "wrong-provider", AuthAttributes: map[string]string{"api_key": testKey},
-				Model: "commandcode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Stream: true,
+				Model: "commandcode/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Stream: true,
 			},
 			StreamID: "down-bad-auth",
 		}
@@ -1471,7 +1471,7 @@ func TestExecuteStreamInvalidAuthRejection(t *testing.T) {
 		req := executorRequest{
 			ExecutorRequest: pluginapi.ExecutorRequest{
 				AuthProvider: ProviderID, AuthAttributes: map[string]string{},
-				Model: "commandcode-go/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Stream: true,
+				Model: "commandcode/glm-5.3", SourceFormat: "openai", OriginalRequest: []byte(ccRequestBody), Stream: true,
 			},
 			StreamID: "down-bad-auth-key",
 		}
@@ -1501,7 +1501,7 @@ func TestExecuteUsesSelectedAuthKeyWithoutFallback(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 
-	resp, err := m.HandleCall("executor.execute", execReqBodyWithKey("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), false, customKey))
+	resp, err := m.HandleCall("executor.execute", execReqBodyWithKey("commandcode/glm-5.3", "openai", []byte(ccRequestBody), false, customKey))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -1543,7 +1543,7 @@ func TestExecuteStreamUsesSelectedAuthKey(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBodyForKey("commandcode-go/glm-5.3", "openai", []byte(ccRequestBody), "down-auth", customKey))
+		execStreamReqBodyForKey("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-auth", customKey))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -1598,7 +1598,7 @@ func TestExecuteStreamBlockedEmitCannotWedgeTheProducer(t *testing.T) {
 	}
 
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBody("commandcode-go/glm-5.3", "claude", []byte(ccRequestBody), "down-blocked"))
+		execStreamReqBody("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-blocked"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}

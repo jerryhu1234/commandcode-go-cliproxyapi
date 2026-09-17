@@ -136,7 +136,7 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 	case pluginabi.MethodExecutorCountTokens:
 		return classEnvelope(&errclass.Error{
 			Class:   errclass.ClassUnsupported,
-			Message: "executor.count_tokens has no CommandCode Go equivalent",
+			Message: "executor.count_tokens has no CommandCode equivalent",
 		}), nil
 	case pluginabi.MethodExecutorHTTPRequest:
 		return classEnvelope(&errclass.Error{
@@ -222,7 +222,7 @@ func (m *Manager) registerManagement(request []byte) ([]byte, error) {
 			Path        string `json:"path"`
 			Menu        string `json:"menu"`
 			Description string `json:"description"`
-		}{{Path: "/quota", Menu: "CommandCode Go Quota", Description: "View CommandCode Go quota windows."}},
+		}{{Path: "/quota", Menu: "CommandCode Quota", Description: "View CommandCode quota windows."}},
 	}), nil
 }
 
@@ -344,7 +344,7 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 			Label  string `json:"label"`
 			APIKey string `json:"api_key"`
 		}{
-			Type: "commandcode-go", ID: id, Label: "CommandCode Go credential " + hash, APIKey: key.Value,
+			Type: "commandcode-go", ID: id, Label: "CommandCode credential " + hash, APIKey: key.Value,
 		})
 		if err != nil {
 			return fmt.Errorf("build auth record")

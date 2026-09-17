@@ -20,7 +20,7 @@ import (
 )
 
 // forwardingBridge bridges only the C boundary: host.http.do performs REAL
-// http requests against the mock CommandCode Go server; do_stream opens a real
+// http requests against the mock CommandCode server; do_stream opens a real
 // streamed response and tracks its body so stream_read/stream_close drain
 // and release it like the host would.
 type forwardingBridge struct {
@@ -203,7 +203,7 @@ func writeSSE(w http.ResponseWriter, frames []string) {
 	}
 }
 
-// mockCommandCode is a stand-in CommandCode Go server with mutable outage state,
+// mockCommandCode is a stand-in CommandCode server with mutable outage state,
 // swappable catalog / messages payloads, and a scriptable chat endpoint.
 type mockCommandCode struct {
 	mu                   sync.Mutex
@@ -430,7 +430,7 @@ func integrationYAMLWithOverrides(baseURL, extraOverrides string) string {
 }
 
 // newIntegrationManager registers a manager whose outbound calls flow
-// through forwardingCaller into a fresh mock CommandCode Go server.
+// through forwardingCaller into a fresh mock CommandCode server.
 func newIntegrationManager(t *testing.T) (*Manager, *fakeCaller, *mockCommandCode, string) {
 	t.Helper()
 	st := newMockCommandCode(t)
@@ -475,7 +475,7 @@ func TestRegisterAndDiscover(t *testing.T) {
 	}
 
 	byID := integrationStaticIDs(t, m)
-	wantIDs := []string{"commandcode-go/glm-5.2", "commandcode-go/gpt-5.6-luna", "commandcode-go/qwen3.7-max"}
+	wantIDs := []string{"commandcode/glm-5.2", "commandcode/gpt-5.6-luna", "commandcode/qwen3.7-max"}
 	if len(byID) != len(wantIDs) {
 		t.Fatalf("static ids = %v", byID)
 	}
@@ -496,15 +496,15 @@ func TestRegisterAndDiscover(t *testing.T) {
 			t.Fatalf("catalog /models request must not include x-commandcode-session: %v", wire.Headers)
 		}
 	}
-	if byID["commandcode-go/glm-5.2"].DisplayName != "glm-5.2" {
-		t.Fatalf("glm display name = %q, want model ID", byID["commandcode-go/glm-5.2"].DisplayName)
+	if byID["commandcode/glm-5.2"].DisplayName != "glm-5.2" {
+		t.Fatalf("glm display name = %q, want model ID", byID["commandcode/glm-5.2"].DisplayName)
 	}
 }
 
 func TestSessionPromptMarkerNotCapturedInLogs(t *testing.T) {
 	m, f, _, _ := newIntegrationManager(t)
 	const marker = "unique-session-prompt-marker-7f4c"
-	env := mustExecute(t, m, "commandcode-go/glm-5.2", "openai", []byte(`{"model":"commandcode-go/glm-5.2","messages":[{"role":"user","content":"`+marker+`"}]}`))
+	env := mustExecute(t, m, "commandcode/glm-5.2", "openai", []byte(`{"model":"commandcode/glm-5.2","messages":[{"role":"user","content":"`+marker+`"}]}`))
 	if !env.OK {
 		t.Fatalf("execute envelope = %+v", env.Error)
 	}
@@ -521,10 +521,10 @@ func TestSessionPromptMarkerNotCapturedInLogs(t *testing.T) {
 func TestChatNonStreamRoundTrip(t *testing.T) {
 	m, _, st, _ := newIntegrationManager(t)
 
-	reqBody := `{"model":"commandcode-go/glm-5.2","messages":[{"role":"user","content":"weather in sf?"}],` +
+	reqBody := `{"model":"commandcode/glm-5.2","messages":[{"role":"user","content":"weather in sf?"}],` +
 		`"tools":[{"type":"function","function":{"name":"get_weather","description":"current weather",` +
 		`"parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]}`
-	env := mustExecute(t, m, "commandcode-go/glm-5.2", "openai", []byte(reqBody))
+	env := mustExecute(t, m, "commandcode/glm-5.2", "openai", []byte(reqBody))
 	if !env.OK {
 		t.Fatalf("execute envelope = %+v", env.Error)
 	}
@@ -604,7 +604,7 @@ func TestStaleCatalogSurvivesOutage(t *testing.T) {
 		t.Fatalf("reconfigure during outage must succeed (FR-002): %s", resp)
 	}
 	byID := integrationStaticIDs(t, m)
-	for _, id := range []string{"commandcode-go/glm-5.2", "commandcode-go/gpt-5.6-luna", "commandcode-go/qwen3.7-max"} {
+	for _, id := range []string{"commandcode/glm-5.2", "commandcode/gpt-5.6-luna", "commandcode/qwen3.7-max"} {
 		if _, ok := byID[id]; !ok {
 			t.Fatalf("stale snapshot lost %q: %v", id, byID)
 		}
@@ -616,7 +616,7 @@ func TestStaleCatalogSurvivesOutage(t *testing.T) {
 	if env := decodeEnv(t, resp); !env.OK {
 		t.Fatalf("reconfigure after recovery: %s", resp)
 	}
-	if _, ok := integrationStaticIDs(t, m)["commandcode-go/glm-5.2"]; !ok {
+	if _, ok := integrationStaticIDs(t, m)["commandcode/glm-5.2"]; !ok {
 		t.Fatal("recovered catalog lost models")
 	}
 }
@@ -654,10 +654,10 @@ func assertCleanStreamClose(t *testing.T, f *fakeCaller) {
 func TestMessagesNonStreamRoundTrip(t *testing.T) {
 	m, _, st, _ := newIntegrationManager(t)
 
-	reqBody := `{"model":"commandcode-go/qwen3.7-max","max_tokens":64,"system":"be terse",` +
+	reqBody := `{"model":"commandcode/qwen3.7-max","max_tokens":64,"system":"be terse",` +
 		`"messages":[{"role":"user","content":[{"type":"text","text":"weather?"}]}],` +
 		`"tools":[{"name":"get_weather","description":"w","input_schema":{"type":"object"}}]}`
-	env := mustExecute(t, m, "commandcode-go/qwen3.7-max", "claude", []byte(reqBody))
+	env := mustExecute(t, m, "commandcode/qwen3.7-max", "claude", []byte(reqBody))
 	if !env.OK {
 		t.Fatalf("execute envelope = %+v", env.Error)
 	}
@@ -721,10 +721,10 @@ func TestMessagesNonStreamRoundTrip(t *testing.T) {
 func TestResponsesNonStreamRoundTrip(t *testing.T) {
 	m, _, st, _ := newIntegrationManager(t)
 
-	reqBody := `{"model":"commandcode-go/gpt-5.6-luna",` +
+	reqBody := `{"model":"commandcode/gpt-5.6-luna",` +
 		`"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],` +
 		`"tools":[{"type":"function","name":"get_weather","parameters":{"type":"object"}}]}`
-	env := mustExecute(t, m, "commandcode-go/gpt-5.6-luna", "openai-response", []byte(reqBody))
+	env := mustExecute(t, m, "commandcode/gpt-5.6-luna", "openai-response", []byte(reqBody))
 	if !env.OK {
 		t.Fatalf("execute envelope = %+v", env.Error)
 	}
@@ -794,8 +794,8 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 func TestChatStreamingRoundTrip(t *testing.T) {
 	m, f, st, _ := newIntegrationManager(t)
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBodyForKey("commandcode-go/glm-5.2", "openai",
-			[]byte(`{"model":"commandcode-go/glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`), "down-1", "sk-test-1"))
+		execStreamReqBodyForKey("commandcode/glm-5.2", "openai",
+			[]byte(`{"model":"commandcode/glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`), "down-1", "sk-test-1"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -839,8 +839,8 @@ func TestChatStreamingRoundTrip(t *testing.T) {
 func TestMessagesStreamingRoundTrip(t *testing.T) {
 	m, f, st, _ := newIntegrationManager(t)
 	resp, err := m.HandleCall("executor.execute_stream",
-		execStreamReqBodyForKey("commandcode-go/qwen3.7-max", "claude",
-			[]byte(`{"model":"commandcode-go/qwen3.7-max","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`), "down-2", "sk-test-1"))
+		execStreamReqBodyForKey("commandcode/qwen3.7-max", "claude",
+			[]byte(`{"model":"commandcode/qwen3.7-max","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`), "down-2", "sk-test-1"))
 	if err != nil {
 		t.Fatalf("execute_stream: %v", err)
 	}
@@ -942,13 +942,13 @@ func TestDisabledProtocolModelExcludedWithDiagnostic(t *testing.T) {
 		t.Fatalf("reconfigure: %s", resp)
 	}
 	byID := integrationStaticIDs(t, m)
-	if _, ok := byID["commandcode-go/qwen3.7-max"]; ok {
+	if _, ok := byID["commandcode/qwen3.7-max"]; ok {
 		t.Fatal("disabled-protocol model must be excluded from static ids")
 	}
-	if _, ok := byID["commandcode-go/glm-5.2"]; !ok {
+	if _, ok := byID["commandcode/glm-5.2"]; !ok {
 		t.Fatal("routable model missing")
 	}
-	if _, ok := byID["commandcode-go/weird-unknown-9x"]; !ok {
+	if _, ok := byID["commandcode/weird-unknown-9x"]; !ok {
 		t.Fatal("an unknown id takes the default route and must be published")
 	}
 	blob := logBlobOf(f)
@@ -966,8 +966,8 @@ func TestDisabledProtocolModelExcludedWithDiagnostic(t *testing.T) {
 func TestExecuteNativePassthroughMalformedUpstream(t *testing.T) {
 	m, _, st, _ := newIntegrationManager(t)
 	st.setMessagesBody("{definitely not json")
-	env := mustExecute(t, m, "commandcode-go/qwen3.7-max", "claude",
-		[]byte(`{"model":"commandcode-go/qwen3.7-max","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
+	env := mustExecute(t, m, "commandcode/qwen3.7-max", "claude",
+		[]byte(`{"model":"commandcode/qwen3.7-max","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
 	if env.OK || env.Error == nil || env.Error.Code != "translation_failure" {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -984,7 +984,7 @@ func TestDuplicateCatalogEntriesDeduped(t *testing.T) {
 		t.Fatalf("reconfigure: %s", resp)
 	}
 	byID := integrationStaticIDs(t, m)
-	if _, ok := byID["commandcode-go/glm-5.2"]; !ok {
+	if _, ok := byID["commandcode/glm-5.2"]; !ok {
 		t.Fatalf("glm-5.2 missing: %v", byID)
 	}
 	if len(byID) != 1 {
@@ -994,12 +994,12 @@ func TestDuplicateCatalogEntriesDeduped(t *testing.T) {
 
 func TestToolResultRoundTrip(t *testing.T) {
 	m, _, st, _ := newIntegrationManager(t)
-	reqBody := `{"model":"commandcode-go/qwen3.7-max","max_tokens":64,"messages":[
+	reqBody := `{"model":"commandcode/qwen3.7-max","max_tokens":64,"messages":[
 		{"role":"user","content":[{"type":"text","text":"weather?"}]},
 		{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"get_weather","input":{"city":"sf"}}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":[{"type":"text","text":"sunny"}]}]}
 	]}`
-	env := mustExecute(t, m, "commandcode-go/qwen3.7-max", "claude", []byte(reqBody))
+	env := mustExecute(t, m, "commandcode/qwen3.7-max", "claude", []byte(reqBody))
 	if !env.OK {
 		t.Fatalf("execute envelope = %+v", env.Error)
 	}
@@ -1039,8 +1039,8 @@ func TestThinkingBlocksPolicy(t *testing.T) {
 		`"content":[{"type":"thinking","thinking":"weigh options","signature":"sig123"},` +
 		`{"type":"text","text":"answer"}],` +
 		`"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":4}}`)
-	env := mustExecute(t, m, "commandcode-go/qwen3.7-max", "claude",
-		[]byte(`{"model":"commandcode-go/qwen3.7-max","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
+	env := mustExecute(t, m, "commandcode/qwen3.7-max", "claude",
+		[]byte(`{"model":"commandcode/qwen3.7-max","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
 	if !env.OK {
 		t.Fatalf("execute envelope = %+v", env.Error)
 	}
@@ -1059,8 +1059,8 @@ func TestThinkingBlocksPolicy(t *testing.T) {
 func TestReasoningControlsExplicit(t *testing.T) {
 	t.Run("openai reasoning_effort passthrough", func(t *testing.T) {
 		m, _, st, _ := newIntegrationManager(t)
-		env := mustExecute(t, m, "commandcode-go/glm-5.2", "openai",
-			[]byte(`{"model":"commandcode-go/glm-5.2","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`))
+		env := mustExecute(t, m, "commandcode/glm-5.2", "openai",
+			[]byte(`{"model":"commandcode/glm-5.2","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`))
 		if !env.OK {
 			t.Fatalf("execute envelope = %+v", env.Error)
 		}
@@ -1082,10 +1082,10 @@ func TestResponsesUnsupportedFeatureDescriptive(t *testing.T) {
 	// Cross-format client (openai source) brings a non-function tool to the
 	// Responses route; the adapter must reject it descriptively instead of
 	// silently dropping it or emitting malformed output.
-	reqBody := `{"model":"commandcode-go/gpt-5.6-luna",
+	reqBody := `{"model":"commandcode/gpt-5.6-luna",
 		"messages":[{"role":"user","content":"hi"}],
 		"tools":[{"type":"web_search"}]}`
-	resp, err := m.HandleCall("executor.execute", execReqBody("commandcode-go/gpt-5.6-luna", "openai", []byte(reqBody), false))
+	resp, err := m.HandleCall("executor.execute", execReqBody("commandcode/gpt-5.6-luna", "openai", []byte(reqBody), false))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -1133,11 +1133,11 @@ func TestNoKeyLeakageE2E(t *testing.T) {
 		return http.StatusOK, "", integrationCompletion
 	})
 
-	failResp, err := m.HandleCall("executor.execute", execReqBodyWithKey("commandcode-go/glm-5.2", "openai", []byte(ccRequestBody), false, "sk-test-1"))
+	failResp, err := m.HandleCall("executor.execute", execReqBodyWithKey("commandcode/glm-5.2", "openai", []byte(ccRequestBody), false, "sk-test-1"))
 	if err != nil {
 		t.Fatalf("failing execute: %v", err)
 	}
-	okResp, err := m.HandleCall("executor.execute", execReqBodyWithKey("commandcode-go/glm-5.2", "openai", []byte(ccRequestBody), false, "sk-test-2"))
+	okResp, err := m.HandleCall("executor.execute", execReqBodyWithKey("commandcode/glm-5.2", "openai", []byte(ccRequestBody), false, "sk-test-2"))
 	if err != nil {
 		t.Fatalf("succeeding execute: %v", err)
 	}
@@ -1241,8 +1241,8 @@ func TestRouteOverrideEndpointReachesUpstream(t *testing.T) {
 	if env := decodeEnv(t, resp); !env.OK {
 		t.Fatalf("reconfigure: %s", resp)
 	}
-	env := mustExecute(t, m, "commandcode-go/totally-new-x", "claude",
-		[]byte(`{"model":"commandcode-go/totally-new-x","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
+	env := mustExecute(t, m, "commandcode/totally-new-x", "claude",
+		[]byte(`{"model":"commandcode/totally-new-x","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
 	if !env.OK {
 		t.Fatalf("execute envelope = %+v", env.Error)
 	}
@@ -1278,8 +1278,8 @@ func TestE2EOpenAIClientToMessagesRoute(t *testing.T) {
 	m, _, st, _ := newIntegrationManager(t)
 	st.setMessagesBody(e2eAnthropicToolUse)
 
-	env := mustExecute(t, m, "commandcode-go/qwen3.7-max", "openai",
-		[]byte(`{"model":"commandcode-go/qwen3.7-max","messages":[{"role":"user","content":"weather?"}]}`))
+	env := mustExecute(t, m, "commandcode/qwen3.7-max", "openai",
+		[]byte(`{"model":"commandcode/qwen3.7-max","messages":[{"role":"user","content":"weather?"}]}`))
 	if !env.OK {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -1344,8 +1344,8 @@ func TestE2EResponsesClientToMessagesRoute(t *testing.T) {
 	m, _, st, _ := newIntegrationManager(t)
 	st.setMessagesBody(e2eAnthropicToolUse)
 
-	env := mustExecute(t, m, "commandcode-go/qwen3.7-max", "openai-response",
-		[]byte(`{"model":"commandcode-go/qwen3.7-max","input":"weather?"}`))
+	env := mustExecute(t, m, "commandcode/qwen3.7-max", "openai-response",
+		[]byte(`{"model":"commandcode/qwen3.7-max","input":"weather?"}`))
 	if !env.OK {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
@@ -1443,7 +1443,7 @@ func TestE2EClaudeClientToResponsesRoute(t *testing.T) {
 	m, _, st, _ := newIntegrationManager(t)
 
 	env := mustExecute(t, m, "gpt-5.6-luna", "claude",
-		[]byte(`{"model":"commandcode-go/gpt-5.6-luna","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
+		[]byte(`{"model":"commandcode/gpt-5.6-luna","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
 	if !env.OK {
 		t.Fatalf("envelope = %+v", env.Error)
 	}

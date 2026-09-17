@@ -1,5 +1,5 @@
 // Command commandcode-go-cliproxyapi builds the CLIProxyAPI native plugin DLL
-// exposing the CommandCode Go provider. This file is CGO glue only: every RPC
+// exposing the CommandCode provider. This file is CGO glue only: every RPC
 // method is forwarded verbatim into internal/plugin.HandleCall.
 package main
 

@@ -47,7 +47,7 @@ func TestBuildRequestUnsupportedFormat(t *testing.T) {
 }
 
 func TestBuildRequestClaude(t *testing.T) {
-	body := []byte(`{"model":"commandcode-go/minimax","max_tokens":10,"system":"s","stream":true}`)
+	body := []byte(`{"model":"commandcode/minimax","max_tokens":10,"system":"s","stream":true}`)
 	out, eErr := BuildRequest("minimax", "claude", []byte(body), nil)
 	if eErr != nil {
 		t.Fatalf("unexpected error: %v", eErr)

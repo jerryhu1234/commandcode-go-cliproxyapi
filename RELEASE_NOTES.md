@@ -1,8 +1,8 @@
 # Release Notes
 
-## v0.1.0 — CommandCode Go provider
+## v0.1.0 — CommandCode Go/GOAT/Pro/Max provider
 
-First release of the plugin as a CommandCode Go provider, derived from
+First release of the plugin as a CommandCode Go/GOAT/Pro/Max provider, derived from
 opencode-go-cliproxyapi v0.1.7.
 
 **Adaptations**
@@ -23,12 +23,12 @@ opencode-go-cliproxyapi v0.1.7.
 - **Quota page against the real account API**: cards show account email, plan,
   remaining plan credits, and the rolling 5-hour/weekly windows from
   `/alpha/billing/credits`, `/alpha/billing/subscriptions` and `/alpha/whoami`.
-- Defaults renamed (`commandcode-go` prefix, `api.commandcode.ai/provider/v1`
+- Defaults renamed (`commandcode` prefix, `api.commandcode.ai/provider/v1`
   base URL, `commandcode-go-cliproxyapi` plugin id).
 
 **Upgrade notes**
 
 - The provider namespace changed, so client model ids must be updated
-  (for example `commandcode-go/deepseek/deepseek-v4.1-flash`).
+  (for example `commandcode/deepseek/deepseek-v4.1-flash`).
 - Replace the plugin binary, restart CLIProxyAPI, and hard-refresh the
   Management Center.

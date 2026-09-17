@@ -73,7 +73,7 @@ func TestBuildRequestUnsupportedFormat(t *testing.T) {
 // ---- openai-response passthrough ----------------------------------------
 
 func TestPassthroughRewritesModelOnly(t *testing.T) {
-	body := []byte(`{"model":"commandcode-go/gpt-5.6-luna","input":"hi","stream":true,"reasoning":{"effort":"low"},"extra":{"nested":[1,2]}}`)
+	body := []byte(`{"model":"commandcode/gpt-5.6-luna","input":"hi","stream":true,"reasoning":{"effort":"low"},"extra":{"nested":[1,2]}}`)
 	m := decodeReq(t, mustBuild(t, "gpt-5.6-luna", "openai-response", body, nil))
 	if m["model"] != "gpt-5.6-luna" {
 		t.Errorf("model = %v", m["model"])
@@ -310,7 +310,7 @@ func TestFromClaudeMessagesFull(t *testing.T) {
 		Levels: []string{"minimal", "low", "medium", "high", "xhigh"},
 	}
 	body := `{
-		"model":"commandcode-go/gpt-5.6-luna","max_tokens":512,"stream":true,"temperature":0.3,"top_p":0.8,
+		"model":"commandcode/gpt-5.6-luna","max_tokens":512,"stream":true,"temperature":0.3,"top_p":0.8,
 		"system":[{"type":"text","text":"s1"},{"type":"text","text":"s2"}],
 		"thinking":{"type":"enabled","budget_tokens":60000},
 		"tool_choice":{"type":"tool","name":"lookup"},

@@ -836,7 +836,7 @@ func (e ResponsesEventEmitter) ReasoningItemAdded(itemID string, outputIndex int
 // ReasoningPartAdded opens the item's single summary part.
 func (e ResponsesEventEmitter) ReasoningPartAdded(itemID string, outputIndex int) []byte {
 	return SSEEvent("response.reasoning_summary_part.added", map[string]any{
-		"type": "response.reasoning_summary_part.added",
+		"type":    "response.reasoning_summary_part.added",
 		"item_id": itemID, "output_index": outputIndex, "summary_index": 0,
 		"part": RespReasoningPart{Type: "summary_text"},
 	})
@@ -845,7 +845,7 @@ func (e ResponsesEventEmitter) ReasoningPartAdded(itemID string, outputIndex int
 // ReasoningSummaryDelta streams one partial reasoning summary fragment.
 func (e ResponsesEventEmitter) ReasoningSummaryDelta(itemID string, outputIndex int, delta string) []byte {
 	return SSEEvent("response.reasoning_summary_text.delta", map[string]any{
-		"type": "response.reasoning_summary_text.delta",
+		"type":    "response.reasoning_summary_text.delta",
 		"item_id": itemID, "output_index": outputIndex, "summary_index": 0, "delta": delta,
 	})
 }
@@ -856,7 +856,7 @@ func (e ResponsesEventEmitter) ReasoningSummaryDelta(itemID string, outputIndex 
 // run, emitted together when text, tool calls, or the stream end arrive.
 func (e ResponsesEventEmitter) ReasoningSummaryDone(itemID string, outputIndex int, text string) []byte {
 	return SSEEvent("response.reasoning_summary_text.done", map[string]any{
-		"type": "response.reasoning_summary_text.done",
+		"type":    "response.reasoning_summary_text.done",
 		"item_id": itemID, "output_index": outputIndex, "summary_index": 0, "text": text,
 	})
 }
@@ -864,7 +864,7 @@ func (e ResponsesEventEmitter) ReasoningSummaryDone(itemID string, outputIndex i
 // ReasoningPartDone closes the summary part with its aggregated text.
 func (e ResponsesEventEmitter) ReasoningPartDone(itemID string, outputIndex int, text string) []byte {
 	return SSEEvent("response.reasoning_summary_part.done", map[string]any{
-		"type": "response.reasoning_summary_part.done",
+		"type":    "response.reasoning_summary_part.done",
 		"item_id": itemID, "output_index": outputIndex, "summary_index": 0,
 		"part": RespReasoningPart{Type: "summary_text", Text: text},
 	})

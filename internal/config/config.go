@@ -16,7 +16,7 @@ import (
 // Defaults (spec 04 §2/§4).
 const (
 	DefaultBaseURL          = "https://api.commandcode.ai/provider/v1"
-	DefaultModelPrefix      = "commandcode-go"
+	DefaultModelPrefix      = "commandcode"
 	DefaultRefreshInterval  = 15 * time.Minute
 	DefaultRequestTimeout   = 5 * time.Minute
 	DefaultMaxResponseBytes = int64(67108864) // 64 MiB

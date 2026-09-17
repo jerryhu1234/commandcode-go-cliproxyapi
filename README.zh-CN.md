@@ -1,14 +1,14 @@
-# CommandCode Go CLIProxyAPI 插件
+# CommandCode Go/GOAT/Pro/Max CLIProxyAPI 插件
 
 [English](README.md) | **简体中文**
 
-一个 [CLIProxyAPI](https://help.router-for.me/plugin/development) 的原生动态 Go 插件，把 **CommandCode Go** 套餐作为单一 provider（`commandcode-go`）对外提供。
+一个 [CLIProxyAPI](https://help.router-for.me/plugin/development) 的原生动态 Go 插件，把 **CommandCode Go/GOAT/Pro/Max** 套餐作为单一 provider（`commandcode-go`；对外发布的模型 id 带 `commandcode/` 前缀）对外提供。
 
 插件自己负责模型发现、协议翻译、请求执行、密钥调度和配额页面，因此一份 API key 池就能同时服务 OpenAI、Anthropic 和 Responses 三种客户端。
 
 ## 上游实际提供了什么
 
-CommandCode Go 通过它的 OpenAI 兼容入口访问：
+CommandCode Go/GOAT/Pro/Max 通过它的 OpenAI 兼容入口访问：
 
 | 上游路由 | 状态 |
 |---|---|
@@ -23,7 +23,7 @@ CommandCode Go 通过它的 OpenAI 兼容入口访问：
 
 ## 为什么需要这个插件
 
-不用插件时，把 CommandCode Go 接入 CLIProxyAPI 需要手写多个 provider 段，而且几个客户端强依赖的能力要么缺失、要么是错的：
+不用插件时，把 CommandCode Go/GOAT/Pro/Max 接入 CLIProxyAPI 需要手写多个 provider 段，而且几个客户端强依赖的能力要么缺失、要么是错的：
 
 - **配置与密钥重复**：同一批 key 要在多个 provider 段里各配一遍。
 - **调度被割裂**：轮换、限流、冷却无法共享，管理后台也看不到每个 key 的用量。
@@ -34,13 +34,13 @@ CommandCode Go 通过它的 OpenAI 兼容入口访问：
 ## 解决方式
 
 - **统一密钥池**：插件把每个配置的 key 注册为 CLIProxyAPI 的 auth 记录，轮换、重试、错误冷却、会话粘性和每 key 统计全部交给宿主调度器。
-- **透明翻译与路由**：客户端只写 `commandcode-go/<上游 id>`，不需要知道上游协议。
+- **透明翻译与路由**：客户端只写 `commandcode/<上游 id>`，不需要知道上游协议。
 - **思考保真**：三种客户端格式都能拿到上游的思考文本；模型没有能力声明时，`reasoning_effort` 原样转发。
-- **单一模型目录**：`{base-url}/models` 里的模型全部以 `commandcode-go/` 前缀出现在 `/v1/models`。
+- **单一模型目录**：`{base-url}/models` 里的模型全部以 `commandcode/` 前缀出现在 `/v1/models`。
 
 ## 功能
 
-- **单一 Provider 命名空间**：模型形如 `commandcode-go/deepseek/deepseek-v4.1-flash`、`commandcode-go/z-ai/glm-5.3-flash`（前缀可配置，也可关闭而直接使用上游裸 id）。
+- **单一 Provider 命名空间**：模型形如 `commandcode/deepseek/deepseek-v4.1-flash`、`commandcode/z-ai/glm-5.3-flash`（前缀可配置，也可关闭而直接使用上游裸 id）。
 - **多协议客户端翻译**：OpenAI Chat Completions、Anthropic Messages、OpenAI Responses 三种请求都会转成上游 chat-completions 调用，响应（含流式）再转回来。
 - **思考内容保真**：把上游的 `reasoning`、`reasoning_details[].text`、`reasoning_content` 归一化到各目标格式：
   - Claude 客户端：前置一个 `thinking` 块 + `thinking_delta` 事件；
@@ -87,8 +87,8 @@ plugins:
 
       # 客户端可见的模型 id 前缀
       model-prefix:
-        enabled: true              # true -> "commandcode-go/<model>"（默认 true）
-        value: "commandcode-go"
+        enabled: true              # true -> "commandcode/<model>"（默认 true）
+        value: "commandcode"
 
       # CommandCode API key（至少一个）；支持 ${ENV_VAR}
       api-keys:
@@ -137,7 +137,7 @@ plugins:
 
 ### 配额页面
 
-管理后台 → 插件 里的 `CommandCode Go Quota` 页面读取与 `base-url` 同源的账号接口：
+管理后台 → 插件 里的 `CommandCode Quota` 页面读取与 `base-url` 同源的账号接口：
 
 | 接口 | 用途 |
 |---|---|
@@ -170,3 +170,7 @@ go vet ./...         # 静态检查
 本插件派生自 [opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi)（v0.1.7）：adapter 内核、catalog、config、auth 和配额页骨架都来自那里；CommandCode 相关的改动——思考内容保真、无能力声明时的 effort 透传、chat-completions 单一默认路由、配额页改用真实账号接口——在其之上适配。
 
 本仓库：<https://github.com/mczhoucn/commandcode-go-cliproxyapi>
+
+## 许可证
+
+[MIT](LICENSE)

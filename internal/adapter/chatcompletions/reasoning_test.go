@@ -117,7 +117,7 @@ func TestStreamReasoningToResponses(t *testing.T) {
 	}
 	want := []string{
 		"response.created",
-		"response.output_item.added",   // reasoning @0
+		"response.output_item.added", // reasoning @0
 		"response.reasoning_summary_part.added",
 		"response.reasoning_summary_text.delta",
 		"response.reasoning_summary_text.delta",

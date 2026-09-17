@@ -41,7 +41,7 @@ func (f *fakeClient) set(resp pluginapi.HTTPResponse, err error) {
 func testCfg() config.Config {
 	return config.Config{
 		CatalogURL:       "https://api.commandcode.ai/provider/v1/models",
-		ModelPrefix:      config.ModelPrefix{Enabled: true, Value: "commandcode-go"},
+		ModelPrefix:      config.ModelPrefix{Enabled: true, Value: "commandcode"},
 		MaxResponseBytes: 1 << 20,
 		Catalog:          config.Catalog{StaleWhileUnavailable: true},
 		Protocols:        config.Protocols{ChatCompletions: true, Messages: true, Responses: true},
@@ -122,7 +122,7 @@ func TestRefreshSuccess(t *testing.T) {
 
 	models := m.Models()
 	luna := findModel(t, models, "gpt-5.6-luna")
-	if luna.PublicID != "commandcode-go/gpt-5.6-luna" {
+	if luna.PublicID != "commandcode/gpt-5.6-luna" {
 		t.Errorf("PublicID = %q", luna.PublicID)
 	}
 	if luna.DisplayName != "gpt-5.6-luna" || luna.Protocol != RouteResponses ||
@@ -288,15 +288,15 @@ func TestDefaultRouteIgnoresVendorDirectories(t *testing.T) {
 		if mo.Protocol != RouteChatCompletions {
 			t.Errorf("%s: Protocol = %q, want %q", mo.UpstreamID, mo.Protocol, RouteChatCompletions)
 		}
-		if want := "commandcode-go/" + mo.UpstreamID; mo.PublicID != want {
+		if want := "commandcode/" + mo.UpstreamID; mo.PublicID != want {
 			t.Errorf("PublicID = %q, want %q", mo.PublicID, want)
 		}
 	}
 	// The two models this deployment exists to serve must be reachable under
 	// both their upstream id and the prefixed public id.
 	for _, id := range []string{"deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3-flash"} {
-		if _, ok := m.Lookup("commandcode-go/" + id); !ok {
-			t.Errorf("lookup %q failed", "commandcode-go/"+id)
+		if _, ok := m.Lookup("commandcode/" + id); !ok {
+			t.Errorf("lookup %q failed", "commandcode/"+id)
 		}
 	}
 }
@@ -477,16 +477,16 @@ func TestLookupByPrefixedBareAndMiss(t *testing.T) {
 	m := newManager(testCfg(), fc)
 	mustRefresh(t, m)
 
-	rec, ok := m.Lookup("commandcode-go/glm-5.2")
+	rec, ok := m.Lookup("commandcode/glm-5.2")
 	if !ok || rec.UpstreamID != "glm-5.2" || rec.Protocol != RouteChatCompletions {
 		t.Errorf("prefixed lookup = %+v %v", rec, ok)
 	}
 	rec, ok = m.Lookup("glm-5.2")
-	if !ok || rec.PublicID != "commandcode-go/glm-5.2" {
+	if !ok || rec.PublicID != "commandcode/glm-5.2" {
 		t.Errorf("bare lookup = %+v %v", rec, ok)
 	}
 	rec, ok = m.Lookup("gpt-5.6-luna")
-	if !ok || rec.PublicID != "commandcode-go/gpt-5.6-luna" {
+	if !ok || rec.PublicID != "commandcode/gpt-5.6-luna" {
 		t.Errorf("bare lookup second model = %+v %v", rec, ok)
 	}
 	if _, ok := m.Lookup("no-such-model"); ok {
@@ -533,7 +533,7 @@ func TestSeedFromServesOldRecordsWithNewCfg(t *testing.T) {
 	if rec, ok := m.Lookup("glm-5.2"); !ok || rec.PublicID != "glm-5.2" {
 		t.Errorf("seeded bare lookup = %+v %v", rec, ok)
 	}
-	if _, ok := m.Lookup("commandcode-go/glm-5.2"); ok {
+	if _, ok := m.Lookup("commandcode/glm-5.2"); ok {
 		t.Error("prev's prefixed public id must not resolve under m's prefix-off cfg")
 	}
 	if gotU, wantU := m.Unsupported(), prev.Unsupported(); !reflect.DeepEqual(gotU, wantU) {
@@ -553,7 +553,7 @@ func TestSeedFromServesOldRecordsWithNewCfg(t *testing.T) {
 	if got := m.Models(); len(got) != 1 || got[0].PublicID != "kimi-k3" || got[0].UpstreamID != "kimi-k3" {
 		t.Errorf("post-seed refresh models = %+v, want prefix-off kimi-k3", got)
 	}
-	if got := prev.Models(); len(got) != 2 || got[0].UpstreamID != "glm-5.2" || got[0].PublicID != "commandcode-go/glm-5.2" {
+	if got := prev.Models(); len(got) != 2 || got[0].UpstreamID != "glm-5.2" || got[0].PublicID != "commandcode/glm-5.2" {
 		t.Errorf("prev mutated by seeding: %+v", got)
 	}
 }
@@ -956,7 +956,7 @@ func TestSeedFromRevalidatesEndpointsAgainstNewBase(t *testing.T) {
 			t.Fatalf("escaping seeded endpoint still routable: %+v", mo)
 		}
 	}
-	if _, ok := m.Lookup("commandcode-go/totally-new-x"); ok {
+	if _, ok := m.Lookup("commandcode/totally-new-x"); ok {
 		t.Fatal("escaping record must not resolve via Lookup")
 	}
 	const wantReason = "resolved endpoint escapes the configured upstream host"
@@ -1031,7 +1031,7 @@ func TestSeedFromRecomputesPublicIDsUnderNewPrefix(t *testing.T) {
 		Body:       []byte(`{"data":[{"id":"glm-5.2"}]}`),
 	}})
 	mustRefresh(t, prev)
-	if got := findModel(t, prev.Models(), "glm-5.2").PublicID; got != "commandcode-go/glm-5.2" {
+	if got := findModel(t, prev.Models(), "glm-5.2").PublicID; got != "commandcode/glm-5.2" {
 		t.Fatalf("precondition: prev PublicID = %q", got)
 	}
 
@@ -1047,22 +1047,22 @@ func TestSeedFromRecomputesPublicIDsUnderNewPrefix(t *testing.T) {
 	if rec, ok := m.Lookup("og/glm-5.2"); !ok || rec.UpstreamID != "glm-5.2" {
 		t.Errorf("new-prefix lookup = %+v %v", rec, ok)
 	}
-	if _, ok := m.Lookup("commandcode-go/glm-5.2"); ok {
+	if _, ok := m.Lookup("commandcode/glm-5.2"); ok {
 		t.Error("old-prefix public id must stop resolving after seed")
 	}
 }
 
 // TestSwapPublicUpstreamCrossKeyCollision pins the index-collision fix: with
-// the prefix enabled, upstream "foo" publishes public "commandcode-go/foo" while
-// an upstream literally named "commandcode-go/foo" claims that same key as its
+// the prefix enabled, upstream "foo" publishes public "commandcode/foo" while
+// an upstream literally named "commandcode/foo" claims that same key as its
 // UpstreamID; last-write-wins would silently misroute one of them. First in
 // catalog order wins, warning is emitted, loser lands in Unsupported.
 func TestSwapPublicUpstreamCrossKeyCollision(t *testing.T) {
-	const wantMsg = `public id "commandcode-go/foo" collides with upstream id "commandcode-go/foo"`
-	for _, order := range []string{"foo first", "commandcode-go/foo first"} {
+	const wantMsg = `public id "commandcode/foo" collides with upstream id "commandcode/foo"`
+	for _, order := range []string{"foo first", "commandcode/foo first"} {
 		t.Run(order, func(t *testing.T) {
-			ids := []string{"foo", "commandcode-go/foo"}
-			if order == "commandcode-go/foo first" {
+			ids := []string{"foo", "commandcode/foo"}
+			if order == "commandcode/foo first" {
 				ids[0], ids[1] = ids[1], ids[0]
 			}
 			body := fmt.Sprintf(`{"data":[{"id":%q},{"id":%q}]}`, ids[0], ids[1])
@@ -1076,10 +1076,10 @@ func TestSwapPublicUpstreamCrossKeyCollision(t *testing.T) {
 			mustRefresh(t, m)
 
 			models := m.Models()
-			if len(models) != 1 || models[0].UpstreamID != ids[0] || models[0].PublicID != "commandcode-go/"+ids[0] {
+			if len(models) != 1 || models[0].UpstreamID != ids[0] || models[0].PublicID != "commandcode/"+ids[0] {
 				t.Fatalf("models = %+v, want single winner %q in catalog order", models, ids[0])
 			}
-			if rec, ok := m.Lookup("commandcode-go/foo"); !ok || rec.UpstreamID != ids[0] {
+			if rec, ok := m.Lookup("commandcode/foo"); !ok || rec.UpstreamID != ids[0] {
 				t.Fatalf("contested key resolves to %+v (%v), want the first-in-order record", rec, ok)
 			}
 			foundWarn := false

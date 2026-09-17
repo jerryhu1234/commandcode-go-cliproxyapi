@@ -279,7 +279,7 @@ func deriveCommandCodeSessionID(sourceFormat string, originalRequest []byte) (st
 			}
 		}
 	default:
-		return "", shared.UnsupportedFormat(sourceFormat, "CommandCode Go session derivation")
+		return "", shared.UnsupportedFormat(sourceFormat, "CommandCode session derivation")
 	}
 
 	digest := sha256.Sum256([]byte(content.String()))

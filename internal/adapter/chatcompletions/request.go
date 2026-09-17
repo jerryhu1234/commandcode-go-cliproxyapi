@@ -1,4 +1,4 @@
-// Package chatcompletions implements the CommandCode Go Chat Completions
+// Package chatcompletions implements the CommandCode Chat Completions
 // protocol adapter (arch §8) for routes served via /v1/chat/completions:
 // request conversion (FR-005), non-stream response conversion (FR-006),
 // and SSE stream conversion (AC §B).
@@ -17,10 +17,10 @@ import (
 	"commandcode-go-cliproxyapi/internal/thinking"
 )
 
-// EndpointPath is the upstream CommandCode Go Chat Completions endpoint.
+// EndpointPath is the upstream CommandCode Chat Completions endpoint.
 var EndpointPath = catalog.RouteChatCompletions.EndpointPath()
 
-// AuthHeaders returns the FR-007 authorization headers for an CommandCode Go key.
+// AuthHeaders returns the FR-007 authorization headers for a CommandCode key.
 func AuthHeaders(key string) http.Header {
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+key)

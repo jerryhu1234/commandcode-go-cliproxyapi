@@ -1,4 +1,4 @@
-// Package catalog fetches the live CommandCode Go /v1/models catalog,
+// Package catalog fetches the live CommandCode /v1/models catalog,
 // normalizes metadata, assigns routes, and serves the last good snapshot
 // (FR-002, FR-003, FR-004, FR-010).
 //
@@ -309,7 +309,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			Thinking:     normalizeThinking(e.Thinking),
 		}
 		// With a prefix enabled, one record's PublicID can equal another
-		// record's UpstreamID (upstream "foo" and "commandcode-go/foo" both
+		// record's UpstreamID (upstream "foo" and "commandcode/foo" both
 		// claim index key "<prefix>/foo"); last-write-wins would silently
 		// misroute. First in catalog order wins (same dedup rule as
 		// duplicate IDs); the later record is excluded. Same-role clashes
