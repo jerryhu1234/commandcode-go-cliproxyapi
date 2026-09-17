@@ -387,6 +387,17 @@ func respReq(t *testing.T, body string) (map[string]any, *errclass.Error) {
 	return decodeReq(t, out), nil
 }
 
+func TestResponsesCompactUntypedItems(t *testing.T) {
+	m, eErr := respReq(t, `{"input":[{},{"role":"user","content":"hi"}]}`)
+	if eErr != nil {
+		t.Fatalf("unexpected error: %v", eErr)
+	}
+	msgs := m["messages"].([]any)
+	if len(msgs) != 1 || msgs[0].(map[string]any)["content"] != "hi" {
+		t.Fatalf("compact untyped item not treated as message: %v", msgs)
+	}
+}
+
 func TestResponsesStringInputAndInstructions(t *testing.T) {
 	m, eErr := respReq(t, `{"instructions":"be nice","input":"hello","max_output_tokens":42,"stream":true}`)
 	if eErr != nil {

@@ -1549,12 +1549,30 @@ func UnsupportedPartType(partType, target string) *errclass.Error {
 	}
 }
 
+// NormalizeResponsesItemType implements the OpenAI Responses compact-item
+// default: an item with no type but a role or content is a message.
+// Completely empty items (no type, role, or content) return "" so callers
+// can skip them instead of failing the request.
+func NormalizeResponsesItemType(item RespItem) string {
+	t := strings.TrimSpace(item.Type)
+	if t != "" {
+		return t
+	}
+	if item.Role != "" || HasContent(item.Content) {
+		return "message"
+	}
+	return ""
+}
+
 // UnsupportedInputItemType reports an unrecognized Responses input item type
-// (ClassUnsupported; FR-005 explicit policy).
+// (ClassUnsupported; FR-005 explicit policy). HTTP 400 so the host does not
+// treat a client-body problem as a retryable upstream failure and burn the
+// rest of the key pool.
 func UnsupportedInputItemType(itemType string) *errclass.Error {
 	return &errclass.Error{
-		Class:   errclass.ClassUnsupported,
-		Message: fmt.Sprintf("unsupported Responses input item type %q", itemType),
+		Class:      errclass.ClassUnsupported,
+		Message:    fmt.Sprintf("unsupported Responses input item type %q", itemType),
+		StatusCode: 400,
 	}
 }
 

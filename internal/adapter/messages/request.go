@@ -348,7 +348,11 @@ func fromResponses(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupp
 		return nil, eErr
 	}
 	for _, item := range items {
-		switch item.Type {
+		kind := shared.NormalizeResponsesItemType(item)
+		if kind == "" {
+			continue
+		}
+		switch kind {
 		case "message":
 			blocks, eErr := contentParts(item.Content)
 			if eErr != nil {

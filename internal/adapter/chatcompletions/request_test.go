@@ -587,6 +587,22 @@ func TestBuildRequestResponsesVariants(t *testing.T) {
 			t.Fatalf("wrong: %v", msgs)
 		}
 	})
+	// OpenAI Responses compact form (and the pi agent): {role, content}
+	// with type omitted defaults to a message. An empty object is skipped.
+	t.Run("compact untyped items default to message", func(t *testing.T) {
+		m := mustBuild(t, "openai-response",
+			`{"input":[{},{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`, nil)
+		msgs := m["messages"].([]any)
+		if len(msgs) != 2 {
+			t.Fatalf("want 2 messages, got %d: %v", len(msgs), msgs)
+		}
+		if msgs[0].(map[string]any)["role"] != "user" || msgs[0].(map[string]any)["content"] != "hi" {
+			t.Fatalf("user compact item wrong: %v", msgs[0])
+		}
+		if msgs[1].(map[string]any)["role"] != "assistant" || msgs[1].(map[string]any)["content"] != "yo" {
+			t.Fatalf("assistant compact item wrong: %v", msgs[1])
+		}
+	})
 	t.Run("zero max_output_tokens ignored", func(t *testing.T) {
 		m := mustBuild(t, "openai-response", `{"max_output_tokens":0,"input":"hi"}`, nil)
 		if _, ok := m["max_tokens"]; ok {

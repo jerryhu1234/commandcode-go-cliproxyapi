@@ -846,7 +846,7 @@ func TestResponseStatusInverseKernels(t *testing.T) {
 		t.Errorf("UnsupportedPartType = %v", eErr)
 	}
 	eErr = UnsupportedInputItemType("web_search")
-	if eErr == nil || eErr.Class != errclass.ClassUnsupported ||
+	if eErr == nil || eErr.Class != errclass.ClassUnsupported || eErr.StatusCode != 400 ||
 		eErr.Message != `unsupported Responses input item type "web_search"` {
 		t.Errorf("UnsupportedInputItemType = %v", eErr)
 	}

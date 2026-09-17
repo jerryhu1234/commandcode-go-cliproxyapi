@@ -347,7 +347,11 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		return nil, eErr
 	}
 	for _, item := range items {
-		switch item.Type {
+		kind := shared.NormalizeResponsesItemType(item)
+		if kind == "" {
+			continue
+		}
+		switch kind {
 		case "message":
 			content, eErr := respContent(item.Content)
 			if eErr != nil {
