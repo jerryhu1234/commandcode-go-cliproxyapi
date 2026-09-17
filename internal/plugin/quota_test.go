@@ -134,6 +134,82 @@ func TestQuotaRefresh(t *testing.T) {
 	}
 }
 
+// CommandCode switches windowLimits.exceeded from null to the NAME of the
+// over-cap window ("weekly") once a plan is exhausted. Decoding it as a
+// boolean dropped exactly those accounts with a misleading "response
+// invalid", so the exhausted shape is pinned here.
+func TestQuotaRefreshExhaustedAccount(t *testing.T) {
+	const key = "quota-exhausted-secret"
+	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		if method != pluginabi.MethodHostHTTPDo {
+			return hostOK(map[string]any{}), nil
+		}
+		var wire struct {
+			Method string `json:"method"`
+			URL    string `json:"url"`
+		}
+		if err := json.Unmarshal(payload, &wire); err != nil {
+			t.Fatalf("bad quota request: %s", payload)
+		}
+		switch wire.URL {
+		case "https://quota.test/alpha/billing/credits":
+			// Byte-for-byte the live shape of an exhausted plan: top-level
+			// exceeded is the string "weekly", fiveHour is drained to zero
+			// with no reset time, and the weekly window sits over its cap.
+			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(
+				`{"credits":{"belowThreshold":false,"creditThreshold":0,"monthlyCredits":34.9998441415,"purchasedCredits":0,"freeCredits":0},` +
+					`"windowLimits":{"limited":true,"exceeded":"weekly",` +
+					`"fiveHour":{"used":0,"cap":14,"exceeded":false,"resetAt":0},` +
+					`"weekly":{"used":35.0001558585,"cap":35,"exceeded":true,"resetAt":1789721062334}}}`)}), nil
+		case "https://quota.test/alpha/billing/subscriptions":
+			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(
+				`{"success":true,"data":{"planId":"individual-goat","status":"active"}}`)}), nil
+		case "https://quota.test/alpha/whoami?limits=1":
+			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(
+				`{"success":true,"user":{"email":"exhausted@example.test"},"org":null}`)}), nil
+		}
+		t.Fatalf("unexpected quota URL %q", wire.URL)
+		return nil, nil
+	}}
+	m := NewManager(NewHostBridge(f.call))
+	m.cfg = config.Config{BaseURL: "https://quota.test/provider/v1", RequestTimeout: config.DefaultRequestTimeout, APIKeys: []config.APIKey{{Value: key}}}
+	id, _ := quotaIdentity(key)
+	resp, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{"key_id":"` + id + `"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got quotaCard
+	if err := json.Unmarshal(resp.Body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Error != "" {
+		t.Fatalf("exhausted account returned error %q", got.Error)
+	}
+	if got.Usage == nil {
+		t.Fatal("usage missing for an exhausted account")
+	}
+	if got.Label != "exhausted@example.test" {
+		t.Errorf("label = %q", got.Label)
+	}
+	if got.Usage.Weekly.Status != "exceeded" || got.Usage.Weekly.Percent != 100 {
+		t.Errorf("weekly window = %+v, want exceeded at 100%%", got.Usage.Weekly)
+	}
+	if got.Usage.FiveHour.Status != "ok" || got.Usage.FiveHour.Percent != 0 {
+		t.Errorf("five-hour window = %+v, want an idle ok window", got.Usage.FiveHour)
+	}
+	if got.Usage.CreditsLeft != 34.9998441415 || got.Usage.PlanCredits != 70 {
+		t.Errorf("credits = %v/%v", got.Usage.CreditsLeft, got.Usage.PlanCredits)
+	}
+	if want := time.UnixMilli(1789721062334).UTC().Format(time.RFC3339); got.Usage.Weekly.ResetsAt != want {
+		t.Errorf("weekly reset = %q, want %q", got.Usage.Weekly.ResetsAt, want)
+	}
+	// A zero resetAt means "no reset" and must stay empty rather than
+	// rendering 1970-01-01 in the page.
+	if got.Usage.FiveHour.ResetsAt != "" {
+		t.Errorf("five-hour reset = %q, want empty", got.Usage.FiveHour.ResetsAt)
+	}
+}
+
 func TestQuotaWindowStatuses(t *testing.T) {
 	cases := []struct {
 		name string
@@ -325,6 +401,9 @@ func TestQuotaPageUsesNativeQuotaStylesAndThemeBridge(t *testing.T) {
 		"quota-card",
 		"quota-track",
 		"quota-fill",
+		".quota-fill.is-exceeded { background: var(--error-color); }",
+		`fill.className = usage.status === "exceeded" ? "quota-fill is-exceeded" : "quota-fill"`,
+		`meta.className = usage.status === "exceeded" ? "quota-meta is-exceeded" : "quota-meta"`,
 		"repeat(auto-fill, minmax(380px, 1fr))",
 		"@media (max-width: 768px)",
 		`[data-theme="white"]`,

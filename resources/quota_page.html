@@ -60,6 +60,8 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
 .quota-percent { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .quota-track { height: 8px; margin: 8px 0 6px; overflow: hidden; border-radius: 999px; background: var(--bg-tertiary); }
 .quota-fill { height: 100%; border-radius: inherit; background: var(--success-color); transition: width .2s ease; }
+.quota-fill.is-exceeded { background: var(--error-color); }
+.quota-meta.is-exceeded { color: var(--error-color); }
 .quota-meta { color: var(--text-secondary); font-size: 12px; }
 .quota-actions { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
 .quota-refresh { border: 1px solid var(--border-color); border-radius: 8px; padding: 8px 10px; color: var(--text-primary); background: var(--bg-tertiary); font: inherit; font-size: 12px; cursor: pointer; }
@@ -155,12 +157,12 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   function renderUsage(row, usage) {
     const value = document.createElement("div"); value.className = "quota-percent";
     const track = document.createElement("div"); track.className = "quota-track";
-    const fill = document.createElement("div"); fill.className = "quota-fill";
+    const fill = document.createElement("div"); fill.className = usage.status === "exceeded" ? "quota-fill is-exceeded" : "quota-fill";
     const percent = Math.max(0, Math.min(100, Number(usage.percent) || 0));
     fill.style.width = percent + "%";
     track.setAttribute("role", "progressbar"); track.setAttribute("aria-valuemin", "0"); track.setAttribute("aria-valuemax", "100"); track.setAttribute("aria-valuenow", String(percent)); track.setAttribute("aria-label", "Quota used"); track.appendChild(fill);
     value.textContent = percent + "%";
-    const meta = document.createElement("div"); meta.className = "quota-meta";
+    const meta = document.createElement("div"); meta.className = usage.status === "exceeded" ? "quota-meta is-exceeded" : "quota-meta";
     const parts = [usage.status || "ok"];
     if (Number(usage.cap) > 0) parts.push((Number(usage.used) || 0).toFixed(2) + " / " + Number(usage.cap).toFixed(2) + " credits");
     if (usage.resets_at) parts.push("resets " + new Date(usage.resets_at).toLocaleString());

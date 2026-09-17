@@ -77,9 +77,13 @@ type accountCredits struct {
 		PurchasedCredits float64 `json:"purchasedCredits"`
 		FreeCredits      float64 `json:"freeCredits"`
 	} `json:"credits"`
+	// windowLimits.exceeded is deliberately not decoded: CommandCode reports it
+	// as null while no window is over its cap, but as the NAME of the over-cap
+	// window ("weekly") once one is, so a bool field made exactly the exhausted
+	// accounts fail to decode and their whole snapshot was dropped. Each
+	// window's own boolean exceeded already carries that information.
 	WindowLimits struct {
 		Limited  bool          `json:"limited"`
-		Exceeded *bool         `json:"exceeded"`
 		FiveHour accountWindow `json:"fiveHour"`
 		Weekly   accountWindow `json:"weekly"`
 	} `json:"windowLimits"`
@@ -284,7 +288,9 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 	}
 	var credits accountCredits
 	if err := json.Unmarshal(rawCredits, &credits); err != nil {
-		return quotaUsage{}, "", fmt.Errorf("account credits response invalid")
+		// Carry the decoder's own reason: it names the offending field, which
+		// is the difference between a one-minute and a one-hour diagnosis.
+		return quotaUsage{}, "", fmt.Errorf("account credits response invalid: %v", err)
 	}
 	usage := quotaUsage{
 		CreditsLeft:      credits.Credits.MonthlyCredits,
