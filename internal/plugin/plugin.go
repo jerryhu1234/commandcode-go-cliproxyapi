@@ -19,7 +19,7 @@ import (
 )
 
 // ProviderID is the single provider key served by this plugin (FR-001).
-const ProviderID = "commandcode-go"
+const ProviderID = "commandcode"
 
 // pluginName / pluginVersion are reported in registration metadata.
 const (
@@ -141,7 +141,7 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 	case pluginabi.MethodExecutorHTTPRequest:
 		return classEnvelope(&errclass.Error{
 			Class:   errclass.ClassUnsupported,
-			Message: fmt.Sprintf("%s endpoint is not supported by commandcode-go", pluginabi.MethodExecutorHTTPRequest),
+			Message: fmt.Sprintf("%s endpoint is not supported by commandcode", pluginabi.MethodExecutorHTTPRequest),
 		}), nil
 	default:
 		return ErrEnvelope("unknown_method", "unknown method: "+method), nil
@@ -330,7 +330,7 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 	for _, key := range cfg.APIKeys {
 		digest := sha256.Sum256([]byte(key.Value))
 		hash := hex.EncodeToString(digest[:])
-		id := "commandcode-go-key-" + hash
+		id := ProviderID + "-key-" + hash
 		name := id + ".json"
 		if _, ok := existing[id]; ok {
 			continue
@@ -344,7 +344,7 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 			Label  string `json:"label"`
 			APIKey string `json:"api_key"`
 		}{
-			Type: "commandcode-go", ID: id, Label: "CommandCode credential " + hash, APIKey: key.Value,
+			Type: ProviderID, ID: id, Label: "CommandCode credential " + hash, APIKey: key.Value,
 		})
 		if err != nil {
 			return fmt.Errorf("build auth record")

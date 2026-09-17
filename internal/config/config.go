@@ -1,4 +1,4 @@
-// Package config loads and validates the commandcode-go plugin configuration
+// Package config loads and validates the commandcode plugin configuration
 // per spec 04 (configuration) and spec 05 §2 (HTTPS/timeouts).
 package config
 

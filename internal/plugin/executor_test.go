@@ -1197,7 +1197,7 @@ func TestExecutorIdentifierAndCountTokens(t *testing.T) {
 		t.Fatalf("identifier: %v", err)
 	}
 	env := decodeEnv(t, resp)
-	if !env.OK || !strings.Contains(string(env.Result), `"identifier":"commandcode-go"`) {
+	if !env.OK || !strings.Contains(string(env.Result), `"identifier":"commandcode"`) {
 		t.Fatalf("identifier envelope = %s", resp)
 	}
 	resp, err = m.HandleCall("executor.count_tokens", nil)
@@ -1418,7 +1418,7 @@ func TestExecuteInvalidAuthRejection(t *testing.T) {
 			t.Fatalf("handle call: %v", err)
 		}
 		env := decodeEnv(t, resp)
-		if env.OK || env.Error == nil || env.Error.Code != "auth_failure" || !strings.Contains(env.Error.Message, "selected auth provider is not commandcode-go") {
+		if env.OK || env.Error == nil || env.Error.Code != "auth_failure" || !strings.Contains(env.Error.Message, "selected auth provider is not commandcode") {
 			t.Fatalf("wrong provider envelope = %+v", env.Error)
 		}
 	})
@@ -1459,7 +1459,7 @@ func TestExecuteStreamInvalidAuthRejection(t *testing.T) {
 			t.Fatalf("handle call: %v", err)
 		}
 		env := decodeEnv(t, resp)
-		if env.OK || env.Error == nil || env.Error.Code != "auth_failure" || !strings.Contains(env.Error.Message, "selected auth provider is not commandcode-go") {
+		if env.OK || env.Error == nil || env.Error.Code != "auth_failure" || !strings.Contains(env.Error.Message, "selected auth provider is not commandcode") {
 			t.Fatalf("stream wrong provider envelope = %+v", env.Error)
 		}
 		if got := len(f.callsOf(pluginabi.MethodHostHTTPDoStream)); got != 0 {

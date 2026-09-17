@@ -26,7 +26,7 @@ func (authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest)
 	}
 	if err := json.Unmarshal(req.RawJSON, &raw); err != nil {
 		if req.Provider == ProviderID {
-			return pluginapi.AuthParseResponse{}, fmt.Errorf("commandcode-go auth record has invalid JSON")
+			return pluginapi.AuthParseResponse{}, fmt.Errorf("commandcode auth record has invalid JSON")
 		}
 		return pluginapi.AuthParseResponse{}, nil
 	}
@@ -34,7 +34,7 @@ func (authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest)
 		return pluginapi.AuthParseResponse{Handled: false}, nil
 	}
 	if strings.TrimSpace(raw.APIKey) == "" {
-		return pluginapi.AuthParseResponse{}, fmt.Errorf("commandcode-go auth record has no api key")
+		return pluginapi.AuthParseResponse{}, fmt.Errorf("commandcode auth record has no api key")
 	}
 	if raw.ID == "" {
 		raw.ID = req.FileName
@@ -47,11 +47,11 @@ func (authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest)
 }
 
 func (authProvider) StartLogin(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
-	return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("commandcode-go login is unsupported; configure a manual api key")
+	return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("commandcode login is unsupported; configure a manual api key")
 }
 
 func (authProvider) PollLogin(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
-	return pluginapi.AuthLoginPollResponse{}, fmt.Errorf("commandcode-go login is unsupported; configure a manual api key")
+	return pluginapi.AuthLoginPollResponse{}, fmt.Errorf("commandcode login is unsupported; configure a manual api key")
 }
 
 func (authProvider) RefreshAuth(_ context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {

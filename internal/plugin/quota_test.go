@@ -209,7 +209,7 @@ func TestQuotaUnknownKeyAndResource(t *testing.T) {
 	f := &fakeCaller{}
 	m := NewManager(NewHostBridge(f.call))
 	m.cfg = config.Config{APIKeys: []config.APIKey{{Value: key}}}
-	unknown := "commandcode-go-key-unknown"
+	unknown := "commandcode-key-unknown"
 	resp, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{"key_id":"` + unknown + `"}`)})
 	if err != nil || resp.StatusCode != http.StatusNotFound || strings.Contains(string(resp.Body), key) || strings.Contains(string(resp.Body), unknown) || len(f.callsOf(pluginabi.MethodHostHTTPDo)) != 0 {
 		t.Fatalf("unknown response = %+v err=%v calls=%v", resp, err, f.callsOf(pluginabi.MethodHostHTTPDo))

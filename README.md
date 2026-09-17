@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A native dynamic Go plugin for [CLIProxyAPI](https://help.router-for.me/plugin/development) that exposes a **CommandCode Go/GOAT/Pro/Max** plan as a single provider (`commandcode-go`; published model ids carry the `commandcode/` prefix).
+A native dynamic Go plugin for [CLIProxyAPI](https://help.router-for.me/plugin/development) that exposes a **CommandCode Go/GOAT/Pro/Max** plan as a single provider (`commandcode`; published model ids carry the `commandcode/` prefix).
 
 The plugin owns model discovery, protocol translation, execution, key scheduling, and a quota page for the CommandCode account surface, so one API-key pool serves OpenAI, Anthropic, and Responses clients through CLIProxyAPI.
 

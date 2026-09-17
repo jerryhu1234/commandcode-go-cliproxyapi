@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-一个 [CLIProxyAPI](https://help.router-for.me/plugin/development) 的原生动态 Go 插件，把 **CommandCode Go/GOAT/Pro/Max** 套餐作为单一 provider（`commandcode-go`；对外发布的模型 id 带 `commandcode/` 前缀）对外提供。
+一个 [CLIProxyAPI](https://help.router-for.me/plugin/development) 的原生动态 Go 插件，把 **CommandCode Go/GOAT/Pro/Max** 套餐作为单一 provider（`commandcode`；对外发布的模型 id 带 `commandcode/` 前缀）对外提供。
 
 插件自己负责模型发现、协议翻译、请求执行、密钥调度和配额页面，因此一份 API key 池就能同时服务 OpenAI、Anthropic 和 Responses 三种客户端。
 
@@ -126,7 +126,7 @@ plugins:
 | `base-url` | `string` | `https://api.commandcode.ai/provider/v1` | 上游 provider 地址。必须是合法 HTTPS（`allow-http: true` 时可用 HTTP），不能带 query、fragment 或 userinfo。 |
 | `catalog-url` | `string` | `{base-url}/models` | 目录发现地址。 |
 | `model-prefix.enabled` | `bool` | `true` | `true` 时客户端用 `<prefix>/<model>`，`false` 时直接暴露上游裸 id。 |
-| `model-prefix.value` | `string` | `commandcode-go` | provider 前缀。 |
+| `model-prefix.value` | `string` | `commandcode` | provider 前缀。 |
 | `catalog.refresh-interval` | `duration` | `15m` | 目录轮询周期（最小 `1m`）。 |
 | `catalog.stale-while-unavailable` | `bool` | `true` | 刷新失败时继续提供上一份有效目录。 |
 | `protocols.*` | `bool` | `true` | 路由总开关；关闭的协议会带着诊断信息排除其模型。 |

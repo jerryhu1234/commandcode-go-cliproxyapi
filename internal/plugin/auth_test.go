@@ -13,7 +13,7 @@ import (
 func TestAuthProviderParseAndRefresh(t *testing.T) {
 	secret := "sk-auth-secret-1"
 	p := authProvider{}
-	rawBytes := []byte(`{"type":"commandcode-go","id":"stable","label":"Primary","api_key":"` + secret + `"}`)
+	rawBytes := []byte(`{"type":"commandcode","id":"stable","label":"Primary","api_key":"` + secret + `"}`)
 	parsed, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
 		Provider: ProviderID, FileName: "key.json",
 		RawJSON: rawBytes,
@@ -24,7 +24,7 @@ func TestAuthProviderParseAndRefresh(t *testing.T) {
 	if _, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{RawJSON: []byte(`{"type":"other","api_key":"x1"}`)}); err != nil {
 		t.Fatalf("unrelated auth error = %v", err)
 	}
-	invalid, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{Provider: ProviderID, RawJSON: []byte(`{"type":"commandcode-go"}`)})
+	invalid, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{Provider: ProviderID, RawJSON: []byte(`{"type":"commandcode"}`)})
 	if err == nil || invalid.Handled || strings.Contains(err.Error(), secret) {
 		t.Fatalf("invalid auth = %#v, err=%v", invalid, err)
 	}
@@ -38,7 +38,7 @@ func TestAuthProviderAliasesAndFilenameFallback(t *testing.T) {
 	p := authProvider{}
 	parsed, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
 		FileName: "custom-file.json",
-		RawJSON:  []byte(`{"provider":"commandcode-go","api_key":"sk-alias-key"}`),
+		RawJSON:  []byte(`{"provider":"commandcode","api_key":"sk-alias-key"}`),
 	})
 	if err != nil || !parsed.Handled || parsed.Auth.ID != "custom-file.json" || parsed.Auth.Attributes["api_key"] != "sk-alias-key" {
 		t.Fatalf("alias parse = %#v, err=%v", parsed, err)
@@ -58,17 +58,17 @@ func TestAuthProviderMalformedRecognizedInput(t *testing.T) {
 	p := authProvider{}
 	parsed, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
 		Provider: ProviderID,
-		RawJSON:  []byte(`{"type":"commandcode-go","api_key":"sk-malformed-secret-1"`),
+		RawJSON:  []byte(`{"type":"commandcode","api_key":"sk-malformed-secret-1"`),
 	})
 	if err == nil || parsed.Handled || strings.Contains(err.Error(), "sk-malformed-secret-1") {
 		t.Fatalf("malformed recognized auth = %#v, err=%v", parsed, err)
 	}
-	if err.Error() != "commandcode-go auth record has invalid JSON" {
+	if err.Error() != "commandcode auth record has invalid JSON" {
 		t.Fatalf("malformed recognized auth error = %v", err)
 	}
 
 	unrelated, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
-		RawJSON: []byte(`{"type":"commandcode-go","api_key":"sk-malformed-secret-2"`),
+		RawJSON: []byte(`{"type":"commandcode","api_key":"sk-malformed-secret-2"`),
 	})
 	if err != nil || unrelated.Handled {
 		t.Fatalf("malformed unrelated auth = %#v, err=%v", unrelated, err)
@@ -82,7 +82,7 @@ func TestAuthDispatchMethods(t *testing.T) {
 	if err != nil || !bytesContain(raw, []byte(ProviderID)) {
 		t.Fatalf("identifier = %s, err=%v", raw, err)
 	}
-	raw, err = m.HandleCall(pluginabi.MethodAuthParse, mustJSON(pluginapi.AuthParseRequest{Provider: ProviderID, RawJSON: []byte(`{"type":"commandcode-go","api_key":"sk-dispatch-1"}`)}))
+	raw, err = m.HandleCall(pluginabi.MethodAuthParse, mustJSON(pluginapi.AuthParseRequest{Provider: ProviderID, RawJSON: []byte(`{"type":"commandcode","api_key":"sk-dispatch-1"}`)}))
 	if err != nil {
 		t.Fatal(err)
 	}

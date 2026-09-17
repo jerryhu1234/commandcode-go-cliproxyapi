@@ -40,7 +40,7 @@ func debugTrace(format string, args ...any) {
 	debugMu.Lock()
 	defer debugMu.Unlock()
 
-	path := filepath.Join(filepath.Dir(os.Args[0]), "commandcode-go-debug.log")
+	path := filepath.Join(filepath.Dir(os.Args[0]), "commandcode-debug.log")
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return

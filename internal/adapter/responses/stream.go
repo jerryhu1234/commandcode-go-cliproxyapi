@@ -52,7 +52,7 @@ func NewStreamConverter(sourceFormat string) *StreamConverter {
 		// payload and never read raw.
 		framer:    shared.NewSSEFramer(sourceFormat == "openai-response"),
 		source:    sourceFormat,
-		id:        "commandcode-go",
+		id:        "commandcode",
 		textIndex: -1,
 	}
 	sc.tracker = newToolCallTracker(sc.allocIndex)

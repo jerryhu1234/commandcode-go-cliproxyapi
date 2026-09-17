@@ -163,7 +163,7 @@ func planFor(planID string) (string, float64) {
 func quotaIdentity(key string) (id, label string) {
 	digest := sha256.Sum256([]byte(key))
 	hash := hex.EncodeToString(digest[:])
-	return "commandcode-go-key-" + hash, "CommandCode credential " + hash[:12]
+	return ProviderID + "-key-" + hash, "CommandCode credential " + hash[:12]
 }
 
 func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {

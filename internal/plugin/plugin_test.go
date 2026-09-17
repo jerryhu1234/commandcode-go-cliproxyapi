@@ -367,14 +367,14 @@ func TestBridgeAuthSaveWireAndRedactsFailures(t *testing.T) {
 		if err := json.Unmarshal(payload, &wire); err != nil {
 			t.Fatalf("payload not json: %v", err)
 		}
-		if wire.Name != "commandcode-go-key-test.json" || string(wire.JSON) != `{"type":"commandcode-go","api_key":"`+secret+`"}` {
+		if wire.Name != "commandcode-key-test.json" || string(wire.JSON) != `{"type":"commandcode","api_key":"`+secret+`"}` {
 			t.Fatalf("wire request = %+v", wire)
 		}
 		return hostOK(pluginapi.HostAuthSaveResponse{Name: wire.Name}), nil
 	}}
 	if err := NewHostBridge(f.call).AuthSave(context.Background(), pluginapi.HostAuthSaveRequest{
-		Name: "commandcode-go-key-test.json",
-		JSON: json.RawMessage(`{"type":"commandcode-go","api_key":"` + secret + `"}`),
+		Name: "commandcode-key-test.json",
+		JSON: json.RawMessage(`{"type":"commandcode","api_key":"` + secret + `"}`),
 	}); err != nil {
 		t.Fatalf("AuthSave: %v", err)
 	}
@@ -404,14 +404,14 @@ func TestBridgeAuthListDecodesEntries(t *testing.T) {
 			t.Fatalf("list payload not json: %v", err)
 		}
 		return hostOK(hostAuthListResponse{Files: []pluginapi.HostAuthFileEntry{{
-			ID: "commandcode-go-key-existing", Name: "commandcode-go-key-existing.json", Priority: 7,
+			ID: "commandcode-key-existing", Name: "commandcode-key-existing.json", Priority: 7,
 		}}}), nil
 	}}
 	entries, err := NewHostBridge(f.call).AuthList(context.Background())
 	if err != nil {
 		t.Fatalf("AuthList: %v", err)
 	}
-	if len(entries) != 1 || entries[0].ID != "commandcode-go-key-existing" || entries[0].Name != "commandcode-go-key-existing.json" || entries[0].Priority != 7 {
+	if len(entries) != 1 || entries[0].ID != "commandcode-key-existing" || entries[0].Name != "commandcode-key-existing.json" || entries[0].Priority != 7 {
 		t.Fatalf("auth entries = %+v", entries)
 	}
 }
@@ -511,7 +511,7 @@ func TestLifecycleMaterializesDeterministicAuthRecords(t *testing.T) {
 		}
 		hash := sha256.Sum256([]byte(record.APIKey))
 		wantHash := hex.EncodeToString(hash[:])
-		if record.Type != ProviderID || record.ID != "commandcode-go-key-"+wantHash || record.Label != "CommandCode credential "+wantHash || wire.Name != record.ID+".json" {
+		if record.Type != ProviderID || record.ID != "commandcode-key-"+wantHash || record.Label != "CommandCode credential "+wantHash || wire.Name != record.ID+".json" {
 			t.Fatalf("record identity = %+v name=%q", record, wire.Name)
 		}
 		if record.APIKey == "" || strings.Contains(wire.Name, record.APIKey) || strings.Contains(record.ID, record.APIKey) {

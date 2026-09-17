@@ -1,5 +1,5 @@
 // Package plugin implements the CLIProxyAPI method dispatcher for the
-// commandcode-go provider (Milestone 3): registration, reconfiguration,
+// commandcode provider (Milestone 3): registration, reconfiguration,
 // model publication, catalog refresh scheduling, and host-callback bridging.
 package plugin
 
