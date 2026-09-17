@@ -489,10 +489,14 @@ func TestQuotaPageUsesNativeQuotaStylesAndThemeBridge(t *testing.T) {
 		// The monthly allowance must stay metered like the two rate-limit
 		// windows instead of degrading back to a bare text row.
 		`label.textContent = "Monthly credits"`,
-		`if (month) { renderUsage(row, month, [left.toFixed(2) + " credits left"]); }`,
+		`if (month) { renderUsage(row, month, [left.toFixed(2) + " credits left"], true); }`,
 		`[["five_hour", "5-hour window"], ["weekly", "Weekly window"]]`,
+		`if (usage) renderUsage(row, usage, null, name === "weekly");`,
 		`text(meta, left.toFixed(2) + " credits left (plan unknown)")`,
-		`function renderUsage(row, usage, extraParts) {`,
+		`function renderUsage(row, usage, extraParts, withDaysLeft) {`,
+		`(extraParts || []).forEach(part => parts.push(part));`,
+		`const days = Math.max(0, Math.ceil((reset.getTime() - Date.now()) / 864e5));`,
+		`parts.push(days === 1 ? "1 day left" : days + " days left");`,
 		"repeat(auto-fill, minmax(380px, 1fr))",
 		"@media (max-width: 768px)",
 		`[data-theme="white"]`,

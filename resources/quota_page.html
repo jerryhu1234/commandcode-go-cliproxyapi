@@ -154,7 +154,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
     });
   }
   function text(parent, value) { const node = document.createElement("span"); node.textContent = value == null || value === "" ? "-" : value; parent.appendChild(node); }
-  function renderUsage(row, usage, extraParts) {
+  function renderUsage(row, usage, extraParts, withDaysLeft) {
     const value = document.createElement("div"); value.className = "quota-percent";
     const track = document.createElement("div"); track.className = "quota-track";
     const fill = document.createElement("div"); fill.className = usage.status === "exceeded" ? "quota-fill is-exceeded" : "quota-fill";
@@ -165,8 +165,15 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
     const meta = document.createElement("div"); meta.className = usage.status === "exceeded" ? "quota-meta is-exceeded" : "quota-meta";
     const parts = [usage.status || "ok"];
     if (Number(usage.cap) > 0) parts.push((Number(usage.used) || 0).toFixed(2) + " / " + Number(usage.cap).toFixed(2) + " credits");
-    if (usage.resets_at) parts.push("resets " + new Date(usage.resets_at).toLocaleString());
     (extraParts || []).forEach(part => parts.push(part));
+    if (usage.resets_at) {
+      const reset = new Date(usage.resets_at);
+      parts.push("resets " + reset.toLocaleString());
+      if (withDaysLeft && !Number.isNaN(reset.getTime())) {
+        const days = Math.max(0, Math.ceil((reset.getTime() - Date.now()) / 864e5));
+        parts.push(days === 1 ? "1 day left" : days + " days left");
+      }
+    }
     text(meta, parts.join(" · "));
     row.append(value, track, meta);
   }
@@ -185,7 +192,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
         const row = document.createElement("div"); row.className = "quota-row";
         const rowHeader = document.createElement("div"); rowHeader.className = "quota-row-header"; const label = document.createElement("span"); label.className = "quota-label"; label.textContent = entry[1]; rowHeader.appendChild(label); row.appendChild(rowHeader);
         const usage = values.get(card.key_id) && values.get(card.key_id)[name];
-        if (usage) renderUsage(row, usage); else { const pending = document.createElement("div"); pending.className = "quota-meta"; pending.textContent = "Not refreshed"; row.appendChild(pending); }
+        if (usage) renderUsage(row, usage, null, name === "weekly"); else { const pending = document.createElement("div"); pending.className = "quota-meta"; pending.textContent = "Not refreshed"; row.appendChild(pending); }
         section.appendChild(row);
       });
       if (cached) {
@@ -193,7 +200,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
         const rowHeader = document.createElement("div"); rowHeader.className = "quota-row-header"; const label = document.createElement("span"); label.className = "quota-label"; label.textContent = "Monthly credits"; rowHeader.appendChild(label); row.appendChild(rowHeader);
         const left = Number(cached.credits_left) || 0;
         const month = cached.month;
-        if (month) { renderUsage(row, month, [left.toFixed(2) + " credits left"]); } else { const meta = document.createElement("div"); meta.className = "quota-meta"; text(meta, left.toFixed(2) + " credits left (plan unknown)"); row.appendChild(meta); }
+        if (month) { renderUsage(row, month, [left.toFixed(2) + " credits left"], true); } else { const meta = document.createElement("div"); meta.className = "quota-meta"; text(meta, left.toFixed(2) + " credits left (plan unknown)"); row.appendChild(meta); }
         section.appendChild(row);
       }
       const updated = fetchedAt.get(card.key_id);
