@@ -28,11 +28,11 @@ const (
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
-// validPlugin rejects empty Metadata.GitHubRepository). NOTE(release): this
-// is a placeholder — point it at the repository this build is published from.
-// The project it was derived from is
+// validPlugin rejects empty Metadata.GitHubRepository) and is the address a
+// plugin store polls for updates, so it must be the repository this build is
+// published from. The project it was derived from is
 // https://github.com/massiveits/opencode-go-cliproxyapi.
-const githubRepoURL = "https://github.com/commandcode-go-cliproxyapi"
+const githubRepoURL = "https://github.com/mczhoucn/commandcode-go-cliproxyapi"
 
 // registerRefreshTimeout bounds ONLY the synchronous initial/reconfigure
 // refreshOnce so a slow catalog cannot block host startup/reconfigure for a

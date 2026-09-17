@@ -1,5 +1,7 @@
 # CommandCode Go CLIProxyAPI Plugin
 
+**English** | [简体中文](README.zh-CN.md)
+
 A native dynamic Go plugin for [CLIProxyAPI](https://help.router-for.me/plugin/development) that exposes a **CommandCode Go** plan as a single provider (`commandcode-go`).
 
 The plugin owns model discovery, protocol translation, execution, key scheduling, and a quota page for the CommandCode account surface, so one API-key pool serves OpenAI, Anthropic, and Responses clients through CLIProxyAPI.
@@ -44,8 +46,7 @@ Without this plugin, using a CommandCode Go plan in CLIProxyAPI requires hand-wr
   - Claude clients get a leading `thinking` block with `thinking_delta` events;
   - Responses clients get a leading `reasoning` output item with `response.reasoning_summary_*` events;
   - OpenAI clients get `reasoning_content` backfilled onto each chunk while the vendor fields stay intact.
-- **Capability-aware Reasoning Controls**: an explicit `route-overrides` declaration (or catalog thinking metadata) re-enables eager validation and clamping; with nothing declared, the client's `reasoning_effort` is forwarded verbatim (`auto`/`none` omit the field) and the upstream is the authority.
-- **Dynamic Catalog Discovery**: remote catalog with local fallback, deduplication, and diagnostics for what was excluded.
+- **Capability-aware Reasoning Controls**: an explicit `route-overrides` declaration (or catalog thinking metadata) re-enables eager validation and clamping; with nothing declared, the client's `reasoning_effort` is forwarded verbatim (`auto`/`none` omit the field) and the upstream is the authority.- **Dynamic Catalog Discovery**: remote catalog with local fallback, deduplication, and diagnostics for what was excluded.
 - **CommandCode Quota Page**: a Management Center page listing every configured credential with its account email, plan, remaining plan credits, and the rolling 5-hour/weekly windows (used, cap, reset time), refreshed per card on demand.
 - **Multi-Key Auth Scheduling**: one key pool shared across all protocols through CLIProxyAPI's native scheduler.
 
@@ -134,7 +135,6 @@ plugins:
 | `allow-http` | `bool` | `false` | Permit `http://` upstreams for local testing. |
 
 ### Quota page
-
 The `CommandCode Go Quota` page (Management Center → plugins) reads the account surface on the same authority as `base-url`:
 
 | Endpoint | Purpose |
@@ -144,6 +144,16 @@ The `CommandCode Go Quota` page (Management Center → plugins) reads the accoun
 | `GET {authority}/alpha/whoami?limits=1` | Account email for the card label |
 
 `{authority}` is derived from `base-url` by trimming its provider path (`/provider/v1`). Each card is refreshed manually and independently; the page never polls, and quota values never influence routing.
+
+### Reasoning effort
+
+CommandCode publishes **no capability API**: `{base-url}/models` returns only `id`, `object`, `created`, `owned_by`, `name` and `context_length`, and its `/alpha/*` account surface has no models or capabilities route. The per-model effort lists that exist live inside the vendor's own clients (the `command-code` CLI and the web app both ship a static table), and the upstream gateway itself accepts every value in the union `low | medium | high | xhigh | max` regardless of the per-model list.
+
+Consequences for this plugin:
+
+- with nothing declared in the catalog, `reasoning_effort` is forwarded verbatim (`auto`/`none` omit the field) so `xhigh` and `max` work;
+- if a catalog entry ever carries a `thinking` object (`levels`, `min`, `max`, `zero_allowed`, `dynamic_allowed`), that declaration takes over and eager validation plus budget clamping are re-enabled;
+- the vendor's per-model table, the probes behind these statements and the evidence for the missing capability API are recorded in [`docs/model-capabilities.md`](docs/model-capabilities.md).
 
 ## Testing
 
@@ -156,3 +166,5 @@ go vet ./...         # vetting
 ## Provenance
 
 This plugin is derived from [opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi) (v0.1.7): the adapter kernel, catalog, config, auth, and quota scaffolding come from there, and the CommandCode-specific behaviour — reasoning preservation, unattributed-capability effort passthrough, the chat-completions-only route default, and the account API used by the quota page — was adapted on top.
+
+Repository: <https://github.com/mczhoucn/commandcode-go-cliproxyapi>
