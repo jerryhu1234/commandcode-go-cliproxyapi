@@ -53,6 +53,41 @@ func TestQuotaListDoesNotCallHost(t *testing.T) {
 	if strings.Contains(string(resp.Body), "quota-key-") || len(f.callsOf(pluginabi.MethodHostHTTPDo)) != 0 {
 		t.Fatalf("list leaked key or called upstream: %s calls=%v", resp.Body, f.callsOf(pluginabi.MethodHostHTTPDo))
 	}
+	if got.Cards[0].Email != "" || got.Cards[1].Email != "" {
+		t.Fatalf("unsynced list cards must not carry an email: %+v", got.Cards)
+	}
+}
+
+func TestQuotaListSurfacesStoredEmail(t *testing.T) {
+	const key = "quota-list-email-secret"
+	id, _ := quotaIdentity(key)
+	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		if method == pluginabi.MethodHostHTTPDo {
+			t.Fatal("list must not call upstream")
+		}
+		if method == pluginabi.MethodHostAuthList {
+			return hostOK(hostAuthListResponse{Files: []pluginapi.HostAuthFileEntry{{
+				ID: id, Name: id + ".json", Email: "dev@example.test", Source: "file",
+			}}}), nil
+		}
+		return hostOK(map[string]any{}), nil
+	}}
+	m := NewManager(NewHostBridge(f.call))
+	m.cfg = config.Config{APIKeys: []config.APIKey{{Value: key}}}
+	resp, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got quotaList
+	if err := json.Unmarshal(resp.Body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Cards) != 1 || got.Cards[0].KeyID != id || got.Cards[0].Email != "dev@example.test" || got.Cards[0].Label != "dev@example.test" {
+		t.Fatalf("cards = %+v", got.Cards)
+	}
+	if got.Cards[0].Usage != nil {
+		t.Fatal("list must not fetch usage for an already-synced account")
+	}
 }
 
 func TestQuotaRefresh(t *testing.T) {
@@ -450,9 +485,10 @@ func TestQuotaPageUsesManualSessionCache(t *testing.T) {
 		"catch (_) {}",
 		"Object.entries(cache)",
 		"values.set(keyID, entry.usage)",
-		"cache[card.key_id] = {usage: result.usage, fetched_at: timestamp, label: labels.get(card.key_id) || \"\"}",
+		"cache[keyID] = {usage, fetched_at: timestamp, label: labels.get(keyID) || \"\"}",
 		"delete cache[keyID]",
 		"new Set(cards.map(card => card.key_id))",
+		"cards.filter(card => !card.email)",
 		"toLocaleString",
 	} {
 		if !strings.Contains(page, marker) {

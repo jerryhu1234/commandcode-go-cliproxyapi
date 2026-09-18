@@ -78,7 +78,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
 </head>
 <body>
 <div class="quota-page">
-  <header class="quota-header"><h1 class="quota-title">CommandCode Quota</h1><p class="quota-description">Usage for each configured credential. Refresh cards individually.</p></header>
+  <header class="quota-header"><h1 class="quota-title">CommandCode Quota</h1><p class="quota-description">Usage for each configured credential. New accounts refresh automatically.</p></header>
   <main id="app"><p class="quota-muted">Loading credentials...</p></main>
 </div>
 <script>
@@ -112,6 +112,8 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   const values = new Map();
   const labels = new Map();
   const fetchedAt = new Map();
+  const errors = new Map();
+  const inFlight = new Set();
   let cache = {};
   try {
     const stored = sessionStorage.getItem(storageKey);
@@ -126,6 +128,37 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   });
   function saveCache() {
     try { sessionStorage.setItem(storageKey, JSON.stringify(cache)); } catch (_) {}
+  }
+  function applyUsage(keyID, usage, label) {
+    const timestamp = new Date().toISOString();
+    values.set(keyID, usage);
+    if (label) labels.set(keyID, label);
+    fetchedAt.set(keyID, timestamp);
+    cache[keyID] = {usage, fetched_at: timestamp, label: labels.get(keyID) || ""};
+    saveCache();
+  }
+  function refreshCard(card, cards, alreadyQueued) {
+    if (!alreadyQueued) {
+      if (inFlight.has(card.key_id)) return Promise.resolve();
+      inFlight.add(card.key_id);
+      errors.delete(card.key_id);
+      render(cards);
+    }
+    return request({key_id: card.key_id}).then(result => {
+      inFlight.delete(card.key_id);
+      if (result.error) {
+        errors.set(card.key_id, result.error);
+        render(cards);
+        return;
+      }
+      if (result.email) card.email = result.email;
+      applyUsage(card.key_id, result.usage, result.label);
+      render(cards);
+    }).catch(err => {
+      inFlight.delete(card.key_id);
+      errors.set(card.key_id, err.message || "Refresh failed");
+      render(cards);
+    });
   }
   function auth() {
     const raw = localStorage.getItem("cli-proxy-auth");
@@ -206,15 +239,29 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
       const updated = fetchedAt.get(card.key_id);
       if (updated) { const timestamp = document.createElement("div"); timestamp.className = "quota-meta"; timestamp.textContent = "Updated " + new Date(updated).toLocaleString(); section.appendChild(timestamp); }
       const actions = document.createElement("div"); actions.className = "quota-actions";
-      const button = document.createElement("button"); button.className = "quota-refresh"; button.textContent = "Refresh"; button.setAttribute("aria-label", "Refresh " + card.label);
-      const error = document.createElement("span"); error.className = "quota-error"; error.setAttribute("role", "status");
-      button.onclick = () => { button.disabled = true; error.textContent = ""; request({key_id: card.key_id}).then(result => { if (result.error) { error.textContent = result.error; button.disabled = false; return; } const timestamp = new Date().toISOString(); values.set(card.key_id, result.usage); if (result.label) labels.set(card.key_id, result.label); fetchedAt.set(card.key_id, timestamp); cache[card.key_id] = {usage: result.usage, fetched_at: timestamp, label: labels.get(card.key_id) || ""}; saveCache(); render(cards); }).catch(err => { error.textContent = err.message || "Refresh failed"; button.disabled = false; }); };
+      const button = document.createElement("button"); button.className = "quota-refresh"; button.textContent = inFlight.has(card.key_id) ? "Refreshing..." : "Refresh"; button.disabled = inFlight.has(card.key_id); button.setAttribute("aria-label", "Refresh " + card.label);
+      const error = document.createElement("span"); error.className = "quota-error"; error.setAttribute("role", "status"); error.textContent = errors.get(card.key_id) || "";
+      button.onclick = () => { refreshCard(card, cards); };
       actions.append(button, error); section.appendChild(actions); grid.appendChild(section);
     });
     app.appendChild(grid);
   }
   if (!auth()) { app.textContent = ""; const p = document.createElement("p"); p.className = "quota-error"; p.setAttribute("role", "status"); p.textContent = "Enable Remember password in Management Center to use this page."; app.appendChild(p); return; }
-  request({}).then(result => { const cards = result.cards || []; const configured = new Set(cards.map(card => card.key_id)); Object.keys(cache).forEach(keyID => { if (!configured.has(keyID)) { delete cache[keyID]; values.delete(keyID); labels.delete(keyID); fetchedAt.delete(keyID); } }); saveCache(); render(cards); }).catch(err => { app.textContent = ""; const p = document.createElement("p"); p.className = "quota-error"; p.setAttribute("role", "status"); p.textContent = err.message || "Unable to load credentials."; app.appendChild(p); });
+  request({}).then(result => {
+    const cards = result.cards || [];
+    const configured = new Set(cards.map(card => card.key_id));
+    Object.keys(cache).forEach(keyID => {
+      if (!configured.has(keyID)) { delete cache[keyID]; values.delete(keyID); labels.delete(keyID); fetchedAt.delete(keyID); }
+    });
+    cards.forEach(card => {
+      if (card.email && !labels.has(card.key_id)) labels.set(card.key_id, card.label);
+    });
+    saveCache();
+    const missing = cards.filter(card => !card.email);
+    missing.forEach(card => inFlight.add(card.key_id));
+    render(cards);
+    missing.forEach(card => refreshCard(card, cards, true));
+  }).catch(err => { app.textContent = ""; const p = document.createElement("p"); p.className = "quota-error"; p.setAttribute("role", "status"); p.textContent = err.message || "Unable to load credentials."; app.appendChild(p); });
 })();
 </script>
 </body>

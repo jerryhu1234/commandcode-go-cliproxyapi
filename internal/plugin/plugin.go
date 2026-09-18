@@ -305,6 +305,20 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	return registrationEnvelope(), nil
 }
 
+// authKeyHash is the non-secret digest that identifies one config key. It is
+// independent of config ordering, which is what keeps the records derived from
+// it idempotent across restarts.
+func authKeyHash(key string) string {
+	digest := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(digest[:])
+}
+
+// authRecordIDFromHash and authFileNameFromHash are the runtime auth ID and the
+// auth file name for one key digest. Both derive from the digest alone so every
+// producer agrees without recomputing it.
+func authRecordIDFromHash(hash string) string { return ProviderID + "-key-" + hash }
+func authFileNameFromHash(hash string) string { return authRecordIDFromHash(hash) + ".json" }
+
 // materializeAuthRecords makes CPA-visible auth files idempotently. Existing
 // records are discovered through CPA so their host-managed metadata is never
 // overwritten. The full key digest is non-secret and independent of config
@@ -328,10 +342,9 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 		}
 	}
 	for _, key := range cfg.APIKeys {
-		digest := sha256.Sum256([]byte(key.Value))
-		hash := hex.EncodeToString(digest[:])
-		id := ProviderID + "-key-" + hash
-		name := id + ".json"
+		hash := authKeyHash(key.Value)
+		id := authRecordIDFromHash(hash)
+		name := authFileNameFromHash(hash)
 		if _, ok := existing[id]; ok {
 			continue
 		}

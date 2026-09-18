@@ -2,8 +2,6 @@ package plugin
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -62,6 +60,7 @@ type quotaUsage struct {
 type quotaCard struct {
 	KeyID string      `json:"key_id"`
 	Label string      `json:"label"`
+	Email string      `json:"email,omitempty"`
 	Usage *quotaUsage `json:"usage,omitempty"`
 	Error string      `json:"error,omitempty"`
 }
@@ -172,9 +171,8 @@ func planFor(planID string) (string, float64) {
 }
 
 func quotaIdentity(key string) (id, label string) {
-	digest := sha256.Sum256([]byte(key))
-	hash := hex.EncodeToString(digest[:])
-	return ProviderID + "-key-" + hash, "CommandCode credential " + hash[:12]
+	hash := authKeyHash(key)
+	return authRecordIDFromHash(hash), "CommandCode credential " + hash[:12]
 }
 
 func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
@@ -195,10 +193,19 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 	keys := append([]config.APIKey(nil), m.cfg.APIKeys...)
 	m.mu.RUnlock()
 	if body.KeyID == "" {
+		// List is deliberately cheap: no upstream account calls. The page
+		// uses the email (already synced into the auth file by a prior
+		// refresh) as the signal that a credential has been fetched once,
+		// and only auto-refreshes cards that still lack one.
+		emails := m.accountEmails(ctx)
 		cards := make([]quotaCard, 0, len(keys))
 		for _, key := range keys {
 			id, label := quotaIdentity(key.Value)
-			cards = append(cards, quotaCard{KeyID: id, Label: label})
+			email := emails[id]
+			if email != "" {
+				label = email
+			}
+			cards = append(cards, quotaCard{KeyID: id, Label: label, Email: email})
 		}
 		return quotaJSON(quotaList{Cards: cards})
 	}
@@ -207,7 +214,7 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 		if id != body.KeyID {
 			continue
 		}
-		usage, account, err := fetchQuota(ctx, m.bridge, baseURL, timeout, key.Value)
+		usage, account, email, err := fetchQuota(ctx, m.bridge, baseURL, timeout, key.Value)
 		if err != nil {
 			// One unreachable or unsupported account must not blank the
 			// whole page: the card carries the failure so the others still
@@ -217,7 +224,17 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 		if account != "" {
 			label = account
 		}
-		return quotaJSON(quotaCard{KeyID: id, Label: label, Usage: &usage})
+		// The account email is known only here, so this is where it is
+		// carried back into the credential's own auth file, which is what
+		// lets the host (and the panel's auth-file list) title the
+		// credential with the mailbox. Best-effort by design: a failed
+		// sync is a cosmetic loss and must never blank the quota card.
+		if email != "" {
+			if errSync := m.syncAccountEmail(ctx, key.Value, email); errSync != nil {
+				_ = m.bridge.Log("warn", "commandcode credential email not synced", map[string]any{"reason": errSync.Error()})
+			}
+		}
+		return quotaJSON(quotaCard{KeyID: id, Label: label, Email: email, Usage: &usage})
 	}
 	return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Body: []byte(`{"error":"unknown quota key"}`)}, nil
 }
@@ -255,16 +272,19 @@ func AccountAPIBase(baseURL string) (string, error) {
 
 // fetchQuota reads one credential's account snapshot: remaining plan credits
 // and the rolling windows come from /alpha/billing/credits, the plan identity
-// from /alpha/billing/subscriptions, and the display label from
-// /alpha/whoami. The label is best-effort — a key still shows its windows
-// when only the credit call succeeds.
-func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout time.Duration, key string) (quotaUsage, string, error) {
+// from /alpha/billing/subscriptions, and the account identity from
+// /alpha/whoami. Two identities are returned for the one whoami answer: label
+// is what the quota card shows ("<org> (<email>)" when the account belongs to
+// an org) and email is the bare mailbox, the only form written into an auth
+// file. Both are best-effort — a key still shows its windows when only the
+// credit call succeeds.
+func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout time.Duration, key string) (quotaUsage, string, string, error) {
 	if bridge == nil {
-		return quotaUsage{}, "", fmt.Errorf("account bridge unavailable")
+		return quotaUsage{}, "", "", fmt.Errorf("account bridge unavailable")
 	}
 	base, err := AccountAPIBase(baseURL)
 	if err != nil {
-		return quotaUsage{}, "", err
+		return quotaUsage{}, "", "", err
 	}
 	if timeout <= 0 || timeout > quotaMaxTimeout {
 		timeout = quotaMaxTimeout
@@ -291,13 +311,13 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 
 	rawCredits, err := get(accountCreditsPath)
 	if err != nil {
-		return quotaUsage{}, "", err
+		return quotaUsage{}, "", "", err
 	}
 	var credits accountCredits
 	if err := json.Unmarshal(rawCredits, &credits); err != nil {
 		// Carry the decoder's own reason: it names the offending field, which
 		// is the difference between a one-minute and a one-hour diagnosis.
-		return quotaUsage{}, "", fmt.Errorf("account credits response invalid: %v", err)
+		return quotaUsage{}, "", "", fmt.Errorf("account credits response invalid: %v", err)
 	}
 	usage := quotaUsage{
 		CreditsLeft:      credits.Credits.MonthlyCredits,
@@ -308,6 +328,7 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 	}
 
 	label := ""
+	email := ""
 	periodEnd := ""
 	if raw, errSub := get(accountSubscriptionPath); errSub == nil {
 		var sub accountSubscription
@@ -326,13 +347,14 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 	if raw, errWho := get(accountWhoamiPath); errWho == nil {
 		var who accountWhoami
 		if json.Unmarshal(raw, &who) == nil {
-			label = strings.TrimSpace(who.User.Email)
+			email = strings.TrimSpace(who.User.Email)
+			label = email
 			if who.Org != nil && strings.TrimSpace(who.Org.Login) != "" {
 				label = strings.TrimSpace(who.Org.Login) + " (" + who.User.Email + ")"
 			}
 		}
 	}
-	return usage, label, nil
+	return usage, label, email, nil
 }
 
 // monthWindow renders the monthly plan allowance as a window. CommandCode's

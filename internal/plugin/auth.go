@@ -23,6 +23,7 @@ func (authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest)
 		ID       string `json:"id"`
 		Label    string `json:"label"`
 		APIKey   string `json:"api_key"`
+		Email    string `json:"email"`
 	}
 	if err := json.Unmarshal(req.RawJSON, &raw); err != nil {
 		if req.Provider == ProviderID {
@@ -39,11 +40,19 @@ func (authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest)
 	if raw.ID == "" {
 		raw.ID = req.FileName
 	}
-	debugTrace("auth parse handled provider=%s file=%s id=%s api_key_present=%t api_key_length=%d", req.Provider, req.FileName, raw.ID, strings.TrimSpace(raw.APIKey) != "", len(raw.APIKey))
-	return pluginapi.AuthParseResponse{Handled: true, Auth: pluginapi.AuthData{
+	debugTrace("auth parse handled provider=%s file=%s id=%s api_key_present=%t api_key_length=%d email_present=%t", req.Provider, req.FileName, raw.ID, strings.TrimSpace(raw.APIKey) != "", len(raw.APIKey), strings.TrimSpace(raw.Email) != "")
+	auth := pluginapi.AuthData{
 		Provider: ProviderID, ID: raw.ID, FileName: req.FileName, Label: raw.Label, StorageJSON: req.RawJSON,
 		Attributes: map[string]string{"api_key": raw.APIKey},
-	}}, nil
+	}
+	// The host derives a credential's email from Metadata["email"], and the
+	// management panel titles the auth entry with that email. Only the bare
+	// mailbox is surfaced: an absent email stays absent instead of becoming an
+	// empty value the panel would have to render around.
+	if email := strings.TrimSpace(raw.Email); email != "" {
+		auth.Metadata = map[string]any{"email": email}
+	}
+	return pluginapi.AuthParseResponse{Handled: true, Auth: auth}, nil
 }
 
 func (authProvider) StartLogin(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
