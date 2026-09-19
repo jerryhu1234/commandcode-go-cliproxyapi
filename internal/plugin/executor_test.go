@@ -583,6 +583,38 @@ func TestExecuteStreamRoutedFromBothMethods(t *testing.T) {
 	})
 }
 
+func TestExecuteStreamForwardsUpstreamErrorBody(t *testing.T) {
+	const frame = `{"error":{"message":"tool parameters must be type object"}}`
+	m, f := newStreamManager(t, streamScript{
+		startStatus: http.StatusBadRequest,
+		upstreamID:  "up-400",
+		frames:      []string{frame},
+	})
+	resp, err := m.HandleCall("executor.execute_stream", execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-400"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := decodeEnv(t, resp)
+	if env.OK || env.Error == nil {
+		t.Fatalf("want error envelope, got %+v", env)
+	}
+	if env.Error.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("status = %d", env.Error.HTTPStatus)
+	}
+	if !strings.Contains(env.Error.Message, "type object") {
+		t.Fatalf("message = %q", env.Error.Message)
+	}
+	if got := len(f.callsOf(pluginabi.MethodHostHTTPStreamRead)); got != 1 {
+		t.Fatalf("reads = %d, want 1", got)
+	}
+	if got := len(f.callsOf(pluginabi.MethodHostHTTPStreamClose)); got != 1 {
+		t.Fatalf("upstream closes = %d, want 1", got)
+	}
+	if got := len(f.callsOf(pluginabi.MethodHostStreamClose)); got != 0 {
+		t.Fatalf("downstream closes without open = %d", got)
+	}
+}
+
 func TestExecuteStreamHappyPathClaudeSource(t *testing.T) {
 	m, f := newStreamManager(t, streamScript{
 		upstreamID: "up-1",

@@ -381,8 +381,19 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		return classEnvelope(errclass.FromNetwork(err)), nil
 	}
 	if st >= 400 {
-		_ = m.bridge.StreamClose(id)
-		return classEnvelope(errclass.FromStatus(st, "")), nil
+		var body []byte
+		if id != "" {
+			payload, errMsg, _, readErr := m.bridge.StreamRead(id)
+			if readErr == nil {
+				if len(payload) > 0 {
+					body = payload
+				} else if errMsg != "" {
+					body = []byte(errMsg)
+				}
+			}
+			_ = m.bridge.StreamClose(id)
+		}
+		return classEnvelope(shared.UpstreamStatusError(st, body)), nil
 	}
 
 	downID := req.StreamID
