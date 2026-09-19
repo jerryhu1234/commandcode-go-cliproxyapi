@@ -167,7 +167,10 @@ go vet ./...         # 静态检查
 
 ## 来源
 
-本插件派生自 [opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi)（v0.1.7）：adapter 内核、catalog、config、auth 和配额页骨架都来自那里；CommandCode 相关的改动——思考内容保真、无能力声明时的 effort 透传、chat-completions 单一默认路由、配额页改用真实账号接口——在其之上适配。
+本插件在编写时参考了另外两个 CommandCode 插件：
+
+- [opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi)（v0.1.7）是直接的前身：adapter 内核、catalog、config、auth 和配额页骨架都来自那里；CommandCode 相关的改动——思考内容保真、无能力声明时的 effort 透传、chat-completions 单一默认路由、配额页改用真实账号接口——在其之上适配。
+- [cpa-plugin-commandcode](https://github.com/ahoo/cpa-plugin-commandcode)（ahoo）是更早的一个独立 CommandCode 插件，它的文档最先记录了本插件必须复现的厂商行为：思考文本出现在 `reasoning` / `reasoning_details[].text` 而从不使用标准的 `reasoning_content`；因此必须在 CLIProxyAPI 的 openai→claude 翻译器读取之前回填 `reasoning_content`；流式 `/v1/messages` 要求每个分块带 SSE `data: ` 前缀；上游只接受完整厂商名（`deepseek/deepseek-v4.1-flash`）。
 
 本仓库：<https://github.com/mczhoucn/commandcode-go-cliproxyapi>
 
