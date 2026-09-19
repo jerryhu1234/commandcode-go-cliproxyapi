@@ -523,6 +523,28 @@ func TestObjectSchema(t *testing.T) {
 	if got := string(ObjectSchema(given)); got != `{"type":"string"}` {
 		t.Fatalf("present schema altered: %s", got)
 	}
+	typed := json.RawMessage(`{"type":"object","properties":{}}`)
+	if got := string(ObjectSchema(typed)); got != string(typed) {
+		t.Fatalf("typed object altered: %s", got)
+	}
+	injected := ObjectSchema(json.RawMessage(`{"anyOf":[{"type":"object","properties":{"agent":{"type":"string"}}}]}`))
+	var obj map[string]any
+	if err := json.Unmarshal(injected, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["type"] != "object" {
+		t.Fatalf("anyOf without type: %s", injected)
+	}
+	if _, ok := obj["anyOf"]; !ok {
+		t.Fatalf("anyOf dropped: %s", injected)
+	}
+	propsOnly := ObjectSchema(json.RawMessage(`{"properties":{}}`))
+	if err := json.Unmarshal(propsOnly, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["type"] != "object" {
+		t.Fatalf("properties without type: %s", propsOnly)
+	}
 }
 
 func TestClaudeStopToFinish(t *testing.T) {

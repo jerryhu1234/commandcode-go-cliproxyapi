@@ -144,13 +144,34 @@ func DefaultArgs(args string) string {
 // without one.
 var emptyObjectSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 
-// ObjectSchema normalizes an absent or null parameter schema to the empty
-// object schema; a present schema passes through untouched.
+// ObjectSchema normalizes a tool parameter schema for CommandCode's
+// function-calling validator, which requires type:object.
+//
+// Absent or null schemas become the empty object schema. Object schemas that
+// omit type (for example a top-level anyOf) get type:object injected. Schemas
+// that already declare type, or that are not JSON objects, are returned
+// untouched.
 func ObjectSchema(raw json.RawMessage) json.RawMessage {
 	if !HasContent(raw) {
 		return emptyObjectSchema
 	}
-	return raw
+	return ensureObjectType(raw)
+}
+
+func ensureObjectType(raw json.RawMessage) json.RawMessage {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return raw
+	}
+	if _, ok := obj["type"]; ok {
+		return raw
+	}
+	obj["type"] = json.RawMessage(`"object"`)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // ToolChoice kinds returned by DecodeToolChoice: "absent" (field missing

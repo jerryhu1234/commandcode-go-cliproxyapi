@@ -658,6 +658,18 @@ func TestBuildRequestResponsesVariants(t *testing.T) {
 			t.Fatalf("system parts wrong: %v", sys)
 		}
 	})
+	t.Run("tool parameters anyOf without type gets type object", func(t *testing.T) {
+		m := mustBuild(t, "openai-response",
+			`{"tools":[{"type":"function","name":"workpool","parameters":{"anyOf":[{"type":"object","properties":{"agent":{"type":"string"}}}]}}],"input":"hi"}`, nil)
+		fn := m["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+		params := fn["parameters"].(map[string]any)
+		if params["type"] != "object" {
+			t.Fatalf("type = %v", params["type"])
+		}
+		if _, ok := params["anyOf"]; !ok {
+			t.Fatalf("anyOf dropped: %v", params)
+		}
+	})
 	t.Run("tool without parameters gets default schema", func(t *testing.T) {
 		m := mustBuild(t, "openai-response",
 			`{"tools":[{"type":"function","name":"f"}],"input":"hi"}`, nil)
