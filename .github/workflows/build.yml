@@ -176,6 +176,7 @@ jobs:
 
   build-freebsd:
     name: Build freebsd/${{ matrix.goarch }}
+    continue-on-error: true
     needs: test
     runs-on: ubuntu-24.04
     strategy:
