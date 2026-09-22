@@ -1,5 +1,16 @@
 # Release Notes
 
+## v0.1.1 — Accept array function_call_output results
+
+Responses `function_call_output.output` may be a string or an array of text
+parts (`input_text`, `output_text`, or `text`). The array shape is flattened
+into the string Chat Completions and Messages already send upstream. Non-text
+parts are still rejected.
+
+**Upgrade notes**
+
+- Replace the plugin binary and restart CLIProxyAPI.
+
 ## v0.1.0 — CommandCode Go/GOAT/Pro/Max provider
 
 First release of the plugin as a CommandCode Go/GOAT/Pro/Max provider, derived from
