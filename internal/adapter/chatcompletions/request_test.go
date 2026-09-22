@@ -587,6 +587,14 @@ func TestBuildRequestResponsesVariants(t *testing.T) {
 			t.Fatalf("wrong: %v", msgs)
 		}
 	})
+	t.Run("function_call_output array of input_text joins", func(t *testing.T) {
+		m := mustBuild(t, "openai-response",
+			`{"input":[{"type":"function_call_output","call_id":"c1","output":[{"type":"input_text","text":"a"},{"type":"input_text","text":"b"}]}]}`, nil)
+		tool := m["messages"].([]any)[0].(map[string]any)
+		if tool["role"] != "tool" || tool["tool_call_id"] != "c1" || tool["content"] != "ab" {
+			t.Fatalf("array output not flattened: %v", tool)
+		}
+	})
 	// OpenAI Responses compact form (and the pi agent): {role, content}
 	// with type omitted defaults to a message. An empty object is skipped.
 	t.Run("compact untyped items default to message", func(t *testing.T) {

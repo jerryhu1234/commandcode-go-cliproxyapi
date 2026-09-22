@@ -468,6 +468,15 @@ func TestResponsesItems(t *testing.T) {
 	if out["type"] != "tool_result" || out["tool_use_id"] != "fc_1" || out["content"] != "out" {
 		t.Errorf("function_call_output block = %v", out)
 	}
+	arrayBody := `{"input":[{"type":"function_call_output","call_id":"fc_2","output":[{"type":"input_text","text":"a"},{"type":"input_text","text":"b"}]}]}`
+	arrayReq, eErr := respReq(t, arrayBody)
+	if eErr != nil {
+		t.Fatalf("array output: %v", eErr)
+	}
+	arrayOut := arrayReq["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if arrayOut["content"] != "ab" || arrayOut["tool_use_id"] != "fc_2" {
+		t.Errorf("array function_call_output = %v", arrayOut)
+	}
 	th := msgs[3].(map[string]any)["content"].([]any)[0].(map[string]any)
 	if th["type"] != "thinking" || th["thinking"] != "thought A\nthought B" {
 		t.Errorf("reasoning block = %v", th)

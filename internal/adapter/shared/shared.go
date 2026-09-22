@@ -440,6 +440,39 @@ func ClaudeSystemText(raw json.RawMessage) (string, *errclass.Error) {
 	return b.String(), nil
 }
 
+// FunctionCallOutputText flattens a Responses function_call_output.output
+// field into the string both Chat Completions and Messages tool results
+// already send upstream. The field is a JSON string or an array of text
+// parts (input_text, output_text, or text). Non-text parts are rejected
+// rather than dropped: function_call_output carries text only.
+func FunctionCallOutputText(raw json.RawMessage) (string, *errclass.Error) {
+	if !HasContent(raw) {
+		return "", nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, nil
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return "", errclass.Translation("function_call_output.output must be a string or an array of text parts: " + err.Error())
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		switch p.Type {
+		case "text", "input_text", "output_text":
+			b.WriteString(p.Text)
+		default:
+			return "", errclass.Translation(fmt.Sprintf(
+				"unsupported tool content part type %q; function_call_output carries text only", p.Type))
+		}
+	}
+	return b.String(), nil
+}
+
 // ToolResultText flattens Claude tool_result content (JSON string or text
 // block array) into one text string for the target protocol's tool-result
 // field. Non-text blocks have no textual representation and are rejected
@@ -1182,8 +1215,10 @@ type RespItem struct {
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
-	Summary   []struct {
+	// Output is a JSON string or an array of text parts. Kept raw so either
+	// shape decodes; FunctionCallOutputText flattens it for upstream.
+	Output  json.RawMessage `json:"output,omitempty"`
+	Summary []struct {
 		Text string `json:"text"`
 	} `json:"summary,omitempty"`
 }

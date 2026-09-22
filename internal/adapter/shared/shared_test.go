@@ -1348,6 +1348,19 @@ func TestResponsesRequestDecodeHelpers(t *testing.T) {
 		!strings.HasPrefix(eErr.Message, "input must be a string or an array of items: ") {
 		t.Errorf("bad input = %v", eErr)
 	}
+
+	var arrayOut ResponsesRequest
+	if err := json.Unmarshal([]byte(`{"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_text","text":"a"},{"type":"input_text","text":"b"}]}]}`), &arrayOut); err != nil {
+		t.Fatal(err)
+	}
+	items, eErr = arrayOut.DecodeInputItems()
+	if eErr != nil || len(items) != 1 || items[0].Type != "function_call_output" {
+		t.Fatalf("array output input = %+v, %v", items, eErr)
+	}
+	got, eErr := FunctionCallOutputText(items[0].Output)
+	if eErr != nil || got != "ab" {
+		t.Fatalf("array output text = %q, %v", got, eErr)
+	}
 }
 
 func TestToolResultErrorPrefix(t *testing.T) {
