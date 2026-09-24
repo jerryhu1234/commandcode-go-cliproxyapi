@@ -39,7 +39,7 @@ env -u GOROOT PATH="$(dirname "${GO_BIN}"):${PATH}" \
   GOTMPDIR="${GO_WORK}/tmp" TMPDIR="${GO_WORK}/tmp" GOENV=off \
   CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
   "${GO_BIN}" build -trimpath -buildmode=c-shared \
-    -ldflags "-s -w -X commandcode-go-cliproxyapi/internal/buildinfo.Version=0.2.0-dev.5 -X commandcode-go-cliproxyapi/internal/buildinfo.Commit=cpa-host-integration" \
+    -ldflags "-s -w -X commandcode-go-cliproxyapi/internal/buildinfo.Version=0.2.5 -X commandcode-go-cliproxyapi/internal/buildinfo.Commit=cpa-host-integration" \
     -o "${WORK}/plugins/${PLUGIN_ID}.so" "${ROOT}"
 
 HARNESS="${HARNESS_DIR}/main.go"

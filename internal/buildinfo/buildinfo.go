@@ -3,7 +3,7 @@ package buildinfo
 
 // Version is the plugin version reported to CLIProxyAPI. Release builds set
 // this to the tag without its leading "v" using -ldflags -X.
-var Version = "0.2.0-dev"
+var Version = "0.2.5"
 
 // Commit identifies the source revision without changing Version's semver
 // shape. Release and CI builds set it independently using -ldflags -X.

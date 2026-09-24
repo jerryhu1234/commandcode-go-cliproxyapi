@@ -1,10 +1,9 @@
 # Release Notes
 
-## v0.2.0 — In development
+## v0.2.5 — CPA v7.3.15 / Manager 1.13 compatibility and Responses fixes
 
-This version is not published yet. Development artifacts use version
-`0.2.0-dev.5` and target CLIProxyAPI v7.3.15 (native plugin ABI 1, schema 6)
-and Management Center 1.13.x.
+v0.2.5 depends on CLIProxyAPI SDK v7.3.6 and is integration-tested against the
+CPA v7.3.15 host (native plugin ABI 1, schema 6) and Management Center 1.13.x.
 
 - Fixes file-backed CommandCode auth identity by deferring ID canonicalization
   to CPA. Initial `host.auth.save`, watcher reparses, atomic email updates,
@@ -45,8 +44,10 @@ and Management Center 1.13.x.
 - Adds CPA's native read-only QuotaProvider while retaining the legacy quota
   page and API. Both paths share the same CommandCode account fetch logic.
 - Native quota validates persisted CommandCode credential identity before using
-  an API key. Caller-selected provider fields alone are not trusted.
-- Development builds report `0.2.0-dev.5`; release builds report the tag version.
+  an API key. Caller-selected provider fields alone are not trusted; runtime
+  auth lookup/physical auth retrieval verifies credential ownership. Reset is
+  unsupported.
+- Untagged CI builds report `0.2.5-dev`; the `v0.2.5` tag reports `0.2.5`.
   Release archives include a provenance JSON containing version, commit,
   archive name, and archive SHA-256.
 - Quota reset, OAuth login, and token counting remain unsupported.
@@ -58,6 +59,14 @@ and Management Center 1.13.x.
   source `ff361648f0b6d54bb678ae555cd86169142635d0`) passes 3/3 real-frontend
   checks from login/Remember password through v2 storage, plugin menu/resource
   iframe, fake Bearer authorization, and rendered quota percentages.
+- Management authentication supports plaintext and `enc::v1::`/`enc::v2::`
+  local storage decoding on the same origin, with redacted diagnostics for
+  missing, malformed, unauthorized, and forbidden states. No credential is
+  sent when the iframe's own storage has no usable credential; this is not an
+  explicit cross-origin access-control mechanism.
+- Release CI injects version/commit metadata and emits checksums plus provenance
+  JSON. The CPA host harness uses owned temporary directories and preserves
+  pre-existing source/auth files during cleanup.
 
 The browser acceptance uses mocked CPA HTTP and CommandCode upstream responses.
 The independent native test loads the shared library through CPA v7.3.15's real
@@ -65,15 +74,33 @@ pluginhost and auth-directory watcher, but does not launch the complete CPA
 server. Real CommandCode production requests and user deployment topology
 remain release-acceptance requirements.
 
+**Known boundaries**
+
+- The plugin does not execute hosted `code_interpreter`, web/file search, or
+  computer tools. Default CPA compatibility may skip those declarations, and
+  custom grammar is a freeform-text downgrade rather than grammar enforcement.
+- Stateful Responses storage/background/conversation semantics are not
+  implemented. Use `responses-compatibility: strict` to reject degradation.
+- Management Center's generic credential-quota list is not adapted for this
+  plugin. Use the native read-only QuotaProvider or the legacy plugin quota
+  page; reset remains unsupported.
+- SDK 4.104 compatibility is reproducible for the covered text/function stream
+  lifecycle, but the user's production LiteLLM version and long-running
+  upstream behavior were not observed, so no single production spinner root
+  cause is claimed.
+
 **Upgrade and rollback**
 
-1. Pin CPA to v7.3.15 and Management Center to 1.13.x, then stop CPA.
+1. Pin CPA to v7.3.15, Management Center to 1.13.x, and plugin v0.2.5, then stop CPA.
 2. Move the old plugin binary to a backup location outside all plugin scan
    directories; leaving an old native file in a scanned directory can make it
    selectable.
 3. Verify `checksums.txt`, the archive SHA-256, and the adjacent provenance JSON.
-4. Extract and install the runtime with its unversioned platform filename,
-   restart CPA, and verify the registered version and quota capability.
+4. For manual installation with `store.version: "0.2.5"`, install the extracted
+   library as `commandcode-go-cliproxyapi-v0.2.5.<platform extension>` (the store
+   installer handles versioned naming automatically),
+   restart CPA, and verify registered version `0.2.5`. Existing auth JSON is
+   retained; do not recreate credentials during the upgrade.
 5. To roll back, stop CPA, remove the new runtime, restore the external backup,
    and restart.
 

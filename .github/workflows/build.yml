@@ -106,7 +106,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.2.0-dev.5"
+            VERSION="0.2.5-dev"
           fi
           COMMIT="${GITHUB_SHA:0:12}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
@@ -166,7 +166,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.2.0-dev.5"
+            VERSION="0.2.5-dev"
           fi
           COMMIT="${GITHUB_SHA:0:12}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
@@ -236,7 +236,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.2.0-dev.5"
+            VERSION="0.2.5-dev"
           fi
           COMMIT="${GITHUB_SHA:0:12}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"

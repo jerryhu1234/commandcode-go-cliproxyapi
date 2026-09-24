@@ -12,7 +12,7 @@ import (
 func TestPackageLibraryKeepsRuntimeNameAndExecutableMode(t *testing.T) {
 	dir := t.TempDir()
 	library := filepath.Join(dir, "commandcode-go-cliproxyapi.so")
-	archive := filepath.Join(dir, "commandcode-go-cliproxyapi_0.2.0_linux_amd64.zip")
+	archive := filepath.Join(dir, "commandcode-go-cliproxyapi_0.2.5_linux_amd64.zip")
 	if err := os.WriteFile(library, []byte("plugin-binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -35,12 +35,12 @@ func TestPackageLibraryKeepsRuntimeNameAndExecutableMode(t *testing.T) {
 func TestPackageCommandWritesProvenance(t *testing.T) {
 	dir := t.TempDir()
 	library := filepath.Join(dir, "commandcode-go-cliproxyapi.so")
-	archive := filepath.Join(dir, "commandcode-go-cliproxyapi_0.2.0_linux_amd64.zip")
+	archive := filepath.Join(dir, "commandcode-go-cliproxyapi_0.2.5_linux_amd64.zip")
 	checksum := archive + ".sha256"
 	if err := os.WriteFile(library, []byte("plugin-binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("VERSION", "0.2.0")
+	t.Setenv("VERSION", "0.2.5")
 	t.Setenv("COMMIT", "deadbeef")
 	oldArgs, oldFlags := os.Args, flag.CommandLine
 	os.Args = []string{"package-release", "-library", library, "-archive", archive, "-checksum", checksum}
@@ -54,7 +54,7 @@ func TestPackageCommandWritesProvenance(t *testing.T) {
 	var got struct {
 		Version, Commit, Archive, SHA256 string
 	}
-	if json.Unmarshal(raw, &got) != nil || got.Version != "0.2.0" || got.Commit != "deadbeef" || got.Archive != filepath.Base(archive) || got.SHA256 == "" {
+	if json.Unmarshal(raw, &got) != nil || got.Version != "0.2.5" || got.Commit != "deadbeef" || got.Archive != filepath.Base(archive) || got.SHA256 == "" {
 		t.Fatalf("provenance = %+v (%s)", got, raw)
 	}
 }

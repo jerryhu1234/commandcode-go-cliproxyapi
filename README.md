@@ -53,7 +53,7 @@ Without this plugin, using a CommandCode Go/GOAT/Pro/Max plan in CLIProxyAPI req
 
 ## Requirements
 
-- **CLIProxyAPI**: exactly `v7.3.15` for the 0.2.0 development target (plugin ABI 1, schema 6)
+- **CLIProxyAPI**: `v7.3.15` is the validated host for v0.2.5 (plugin ABI 1, schema 6); the plugin SDK dependency remains v7.3.6
 - **Management Center**: `1.13.x`
 - **Go Toolchain**: Go 1.26.7 (CGO enabled for `-buildmode=c-shared`)
 
@@ -107,6 +107,10 @@ plugins:
         messages: true
         responses: true
 
+      # Responses -> Chat policy: CPA-compatible degradation by default;
+      # use "strict" to reject stateful/hosted semantics that cannot be preserved.
+      responses-compatibility: "cpa"     # cpa | strict
+
       # Per-model route pins; only needed when the upstream serves another
       # endpoint (CommandCode itself serves OSS models on chat-completions)
       route-overrides:
@@ -131,6 +135,7 @@ plugins:
 | `catalog.refresh-interval` | `duration` | `15m` | Catalog polling cadence (minimum `1m`). |
 | `catalog.stale-while-unavailable` | `bool` | `true` | Keep serving the last good snapshot when a refresh fails. |
 | `protocols.*` | `bool` | `true` | Route kill switches. A disabled protocol excludes its models with a diagnostic. |
+| `responses-compatibility` | `string` | `cpa` | `cpa` follows CPA v7.3.15 degradation rules; `strict` rejects unsupported/stateful Responses semantics before upstream. |
 | `route-overrides` | `map` | `{}` | `{ model: { protocol, endpoint } }` pins a model onto another upstream route. `endpoint` is required. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP timeout (also bounds account/quota calls to 30s). |
 | `max-response-bytes` | `int64` | `67108864` | Maximum non-streaming response body size. |
@@ -147,11 +152,11 @@ The `CommandCode Quota` page (Management Center → plugins) reads the account s
 
 `{authority}` is derived from `base-url` by trimming its provider path (`/provider/v1`). Each card is refreshed manually and independently; the page never polls, and quota values never influence routing.
 
-The legacy page must be opened from the same origin as Management Center. It reads Management Center's remembered credential formats `enc::v1::` and `enc::v2::`; a cross-origin iframe is intentionally rejected before any quota request. Native quota and the page are read-only. Quota reset, OAuth login, and token counting remain unsupported.
+The legacy page must share Management Center's credential storage origin. It reads remembered credential formats `enc::v1::` and `enc::v2::`; when credentials are unavailable in the iframe's own storage, no quota request is sent. This is a storage requirement, not an explicit cross-origin access-control mechanism. Quota queries do not reset provider limits; the legacy page may synchronize account email metadata. Quota reset, OAuth login, and token counting remain unsupported.
 
-## Upgrade to the 0.2.0 development build
+## Upgrade to v0.2.5
 
-0.2.0 has not been released yet. Pin CPA to v7.3.15 and Management Center to 1.13.x before testing this development build. Current development artifacts identify themselves as `0.2.0-dev.5`; they are not a formal release. See [the protocol capability matrix](docs/protocol-capabilities.md) for the exact custom tool, namespace, structured-output, and option-policy boundaries.
+v0.2.5 targets the CPA v7.3.15 host and Management Center 1.13.x validation matrix. Pin the installed plugin version to `0.2.5`. See [the protocol capability matrix](docs/protocol-capabilities.md) for the exact custom tool, namespace, structured-output, and option-policy boundaries.
 
 The Chat Completions route now preserves flat Responses custom tools such as
 `apply_patch` across request, streaming/non-streaming call, and subsequent
@@ -168,7 +173,7 @@ plugin a hosted code interpreter, search service, file store, or computer tool.
 2. Back up the existing plugin file outside every configured plugin scan directory. A backup left under `plugins/`, including an old versioned `.so`/`.dll`/`.dylib`, may still be discovered.
 3. Verify the archive checksum, extract it, and confirm the runtime filename is `commandcode-go-cliproxyapi.<platform extension>`.
 4. Compare the adjacent `*.provenance.json` version, commit, archive name, and SHA-256 with the selected release artifact.
-5. Replace the old runtime file while CPA is stopped, then restart CPA and verify the registered plugin reports version `0.2.0-dev.5` (or the final tag version once released).
+5. For a manual installation pinned with `store.version: "0.2.5"`, install the extracted library as `commandcode-go-cliproxyapi-v0.2.5.<platform extension>`; the store installer handles this naming automatically. Replace the old runtime while CPA is stopped, then restart CPA and verify the registered plugin reports version `0.2.5`. Existing auth JSON is retained; do not recreate credentials as part of the upgrade.
 6. If rollback is needed, stop CPA, remove the new file, restore the backed-up runtime from outside the scan directory, and restart.
 
 ### Reasoning effort

@@ -1,6 +1,7 @@
 # Protocol capability matrix
 
-This matrix describes the `0.2.0-dev.5` development target with CPA v7.3.15.
+This matrix describes v0.2.5 as validated with CPA v7.3.15 and Management
+Center 1.13.x. The Go module intentionally still depends on CPA SDK v7.3.6.
 It distinguishes protocol translation from capabilities actually hosted by CPA,
 CommandCode, or this plugin. Skipping a CPA built-in translator is not evidence
 that the plugin provides the skipped hosted service.

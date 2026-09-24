@@ -50,11 +50,14 @@ CommandCode Go/GOAT/Pro/Max 通过它的 OpenAI 兼容入口访问：
 - **动态目录发现**：远程目录 + 本地兜底、去重，并对被排除的模型给出诊断。
 - **CommandCode 配额页面**：管理后台单独一页，列出每个凭据对应的账号邮箱、套餐、剩余套餐额度和滚动 5 小时/每周窗口（已用、上限、重置时间），每张卡片按需独立刷新。
 - **多密钥调度**：一份 key 池通过 CLIProxyAPI 原生调度器跨所有协议共享。
+- **原生与旧版配额**：CPA v7.3.15 的只读 QuotaProvider 与管理页共用账号数据；不支持 reset。
+- **Responses 工具与流式兼容**：支持 custom、一层 namespace、`additional_tools`、strict/JSON Schema，并输出完整 Responses SSE 生命周期。
 
 ## 环境要求
 
-- **CLIProxyAPI**：`v7.2.138+`
-- **Go**：1.26+（`-buildmode=c-shared` 需要启用 CGO）
+- **CLIProxyAPI**：v0.2.5 已用 `v7.3.15` 验证（插件 SDK 依赖仍为 v7.3.6）
+- **Management Center**：1.13.x
+- **Go**：1.26.7（`-buildmode=c-shared` 需要启用 CGO）
 
 ## 构建
 
@@ -106,6 +109,10 @@ plugins:
         messages: true
         responses: true
 
+      # Responses -> Chat 策略：默认与 CPA v7.3.15 的降级行为一致；
+      # strict 会在上游调用前拒绝无法保真的有状态/托管语义。
+      responses-compatibility: "cpa"     # cpa | strict
+
       # 按模型钉路由；只有上游在别的端点提供该模型时才需要
       # （CommandCode 自身的 OSS 模型都在 chat-completions 上）
       route-overrides:
@@ -130,6 +137,7 @@ plugins:
 | `catalog.refresh-interval` | `duration` | `15m` | 目录轮询周期（最小 `1m`）。 |
 | `catalog.stale-while-unavailable` | `bool` | `true` | 刷新失败时继续提供上一份有效目录。 |
 | `protocols.*` | `bool` | `true` | 路由总开关；关闭的协议会带着诊断信息排除其模型。 |
+| `responses-compatibility` | `string` | `cpa` | `cpa` 对齐 CPA v7.3.15 的降级规则；`strict` 在上游调用前拒绝不支持或有状态的 Responses 语义。 |
 | `route-overrides` | `map` | `{}` | `{ 模型: { protocol, endpoint } }`，把某个模型钉到别的上游路由；`endpoint` 必填。 |
 | `request-timeout` | `duration` | `5m` | 上游 HTTP 超时（配额/账号请求另按 30s 上限）。 |
 | `max-response-bytes` | `int64` | `67108864` | 非流式响应体上限。 |
@@ -146,6 +154,25 @@ plugins:
 | `GET {authority}/alpha/whoami?limits=1` | 卡片标题用的账号邮箱 |
 
 `{authority}` 由 `base-url` 去掉 provider 路径（`/provider/v1`）得到。每张卡片手动独立刷新，页面从不轮询，配额数值也不参与路由决策。
+
+管理页必须与 Management Center 同源。它兼容明文、`enc::v1::` 和
+`enc::v2::` 的本地认证存储；iframe 自身存储中没有可用凭据时不会发送请求。这不是独立的跨源访问控制机制。Manager 的
+“凭证配额列表”尚未为本插件专门适配，插件提供的是原生只读 quota 和旧版
+插件配额页。
+
+## 升级到 v0.2.5
+
+1. 固定 CPA v7.3.15、Management Center 1.13.x 和插件版本 0.2.5，然后停止 CPA。
+2. 把旧 `.so`/`.dll`/`.dylib` 备份到所有插件扫描目录之外；扫描目录内的旧副本仍可能被发现。
+3. 校验 checksum/provenance。手动安装且设置 `store.version: "0.2.5"` 时，将解压的库命名为 `commandcode-go-cliproxyapi-v0.2.5.<平台扩展名>`；商店安装会自动处理此命名。
+4. 重启并确认注册版本为 `0.2.5`。升级会保留现有 auth JSON，不要重建凭据。
+5. 回滚时停止 CPA，删除新文件，从扫描目录外恢复旧文件并重启。
+
+默认 `responses-compatibility: cpa` 会像 CPA v7.3.15 一样跳过 Chat
+无法托管的 builtin 工具，并把 custom grammar 降级成自由文本；这不代表插件
+实际执行 code interpreter、web/file search 或 computer。需要禁止语义降级时
+使用 `strict`。一层 namespace 支持，嵌套、冲突、歧义裸名和超长名会拒绝。
+JSON Schema/strict 只保证协议字段保留，不保证上游模型执行约束。
 
 ### reasoning effort（思考强度）
 
