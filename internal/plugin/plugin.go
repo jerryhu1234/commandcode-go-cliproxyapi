@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
+	"commandcode-go-cliproxyapi/internal/buildinfo"
 	"commandcode-go-cliproxyapi/internal/catalog"
 	"commandcode-go-cliproxyapi/internal/config"
 	"commandcode-go-cliproxyapi/internal/errclass"
@@ -21,11 +22,8 @@ import (
 // ProviderID is the single provider key served by this plugin (FR-001).
 const ProviderID = "commandcode"
 
-// pluginName / pluginVersion are reported in registration metadata.
-const (
-	pluginName    = "commandcode-go-cliproxyapi"
-	pluginVersion = "0.1.1"
-)
+// pluginName is the stable registration and archive identifier.
+const pluginName = "commandcode-go-cliproxyapi"
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
 // validPlugin rejects empty Metadata.GitHubRepository) and is the address a
@@ -127,6 +125,44 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 			return ErrEnvelope("auth_failure", err.Error()), nil
 		}
 		return okEnvelope(resp), nil
+	case pluginabi.MethodQuotaIdentifier:
+		return okEnvelope(map[string]string{"identifier": ProviderID}), nil
+	case pluginabi.MethodQuotaDescribe:
+		var req pluginapi.QuotaDescribeRequest
+		if json.Unmarshal(request, &req) != nil {
+			return ErrEnvelope("invalid_request", "malformed quota describe request body"), nil
+		}
+		resp, err := newQuotaProvider(m, "").DescribeQuota(context.Background(), req)
+		if err != nil {
+			return ErrEnvelope("quota_failure", err.Error()), nil
+		}
+		return okEnvelope(resp), nil
+	case pluginabi.MethodQuotaFetch:
+		var req struct {
+			pluginapi.QuotaFetchRequest
+			HostCallbackID string `json:"host_callback_id,omitempty"`
+		}
+		if json.Unmarshal(request, &req) != nil {
+			return ErrEnvelope("invalid_request", "malformed quota fetch request body"), nil
+		}
+		resp, err := newQuotaProvider(m, req.HostCallbackID).FetchQuota(context.Background(), req.QuotaFetchRequest)
+		if err != nil {
+			return ErrEnvelope("quota_failure", err.Error()), nil
+		}
+		return okEnvelope(resp), nil
+	case pluginabi.MethodQuotaReset:
+		var req struct {
+			pluginapi.QuotaResetRequest
+			HostCallbackID string `json:"host_callback_id,omitempty"`
+		}
+		if json.Unmarshal(request, &req) != nil {
+			return ErrEnvelope("invalid_request", "malformed quota reset request body"), nil
+		}
+		resp, err := newQuotaProvider(m, req.HostCallbackID).ResetQuota(context.Background(), req.QuotaResetRequest)
+		if err != nil {
+			return ErrEnvelope("unsupported", err.Error()), nil
+		}
+		return okEnvelope(resp), nil
 	case pluginabi.MethodManagementRegister:
 		return m.registerManagement(request)
 	case pluginabi.MethodManagementHandle:
@@ -163,6 +199,7 @@ type capabilities struct {
 	ExecutorInputFormats  []string                     `json:"executor_input_formats,omitempty"`
 	ExecutorOutputFormats []string                     `json:"executor_output_formats,omitempty"`
 	ManagementAPI         bool                         `json:"management_api"`
+	QuotaProvider         bool                         `json:"quota_provider"`
 }
 
 type registrationResult struct {
@@ -177,7 +214,7 @@ func registrationEnvelope() []byte {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             pluginName,
-			Version:          pluginVersion,
+			Version:          buildinfo.Version,
 			Author:           pluginName,
 			GitHubRepository: githubRepoURL,
 			ConfigFields:     []pluginapi.ConfigField{},
@@ -190,6 +227,7 @@ func registrationEnvelope() []byte {
 			ExecutorInputFormats:  formats,
 			ExecutorOutputFormats: formats,
 			ManagementAPI:         true,
+			QuotaProvider:         true,
 		},
 	})
 }

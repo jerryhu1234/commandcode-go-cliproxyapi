@@ -35,14 +35,18 @@ func AuthHeaders(key string) http.Header {
 // degraded (FR-005). Unknown formats are ClassUnsupported; malformed
 // input is ClassTranslation. Errors are descriptive and redacted — no
 // silent loss of tools or reasoning controls.
-func BuildRequest(upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
+func BuildRequest(upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport, responsesCompatibility ...string) ([]byte, *errclass.Error) {
 	switch sourceFormat {
 	case "openai":
 		return buildOpenAIRequest(upstreamModel, sourceBody)
 	case "claude":
 		return claudeToChat(upstreamModel, sourceBody, ts)
 	case "openai-response":
-		return responsesToChat(upstreamModel, sourceBody, ts)
+		mode := "cpa"
+		if len(responsesCompatibility) > 0 && responsesCompatibility[0] != "" {
+			mode = responsesCompatibility[0]
+		}
+		return responsesToChat(upstreamModel, sourceBody, ts, mode)
 	default:
 		return nil, shared.UnsupportedFormat(sourceFormat, EndpointPath)
 	}
@@ -103,10 +107,11 @@ type ccContentPart struct {
 }
 
 type ccMessage struct {
-	Role       string              `json:"role"`
-	Content    any                 `json:"content"` // string, []ccContentPart, or nil
-	ToolCalls  []shared.CCToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string              `json:"tool_call_id,omitempty"`
+	Role             string              `json:"role"`
+	Content          any                 `json:"content"` // string, []ccContentPart, or nil
+	ToolCalls        []shared.CCToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string              `json:"tool_call_id,omitempty"`
+	ReasoningContent string              `json:"reasoning_content,omitempty"`
 }
 
 type ccRequest struct {
@@ -121,6 +126,8 @@ type ccRequest struct {
 	Tools             []shared.CCTool `json:"tools,omitempty"`
 	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	ResponseFormat    json.RawMessage `json:"response_format,omitempty"`
+	StreamOptions     json.RawMessage `json:"stream_options,omitempty"`
 }
 
 // encode finalizes and encodes a translated request; the composed types
@@ -304,17 +311,47 @@ func claudeAssistantMessage(m *shared.ClaudeMessageRecord) (*ccMessage, *errclas
 // same field), and max_output_tokens maps to max_tokens. Historical
 // reasoning items are omitted (no CC equivalent; FR-005 explicit omission
 // policy).
-func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
+func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport, compatibility string) ([]byte, *errclass.Error) {
 	var src shared.ResponsesRequest
 	if err := json.Unmarshal(body, &src); err != nil {
 		return nil, errclass.Translation("malformed openai-response request JSON: " + err.Error())
 	}
+	if compatibility == "strict" {
+		if eErr := shared.ValidateResponsesChatOptions(body); eErr != nil {
+			return nil, eErr
+		}
+	}
+	var toolContext shared.ResponsesToolContext
+	var chatTools []shared.CCTool
+	var eErr *errclass.Error
+	if compatibility == "strict" {
+		toolContext, chatTools, eErr = shared.BuildResponsesToolContext(&src, EndpointPath)
+	} else {
+		toolContext, chatTools, eErr = shared.BuildResponsesToolContextCPA(&src, EndpointPath)
+	}
+	if eErr != nil {
+		return nil, eErr
+	}
+	hadToolDeclarations := len(src.Tools) > 0 || hasAdditionalToolDeclarations(src.Input)
 	out := &ccRequest{
 		Model:             upstreamModel,
 		Stream:            src.Stream,
 		Temperature:       src.Temperature,
 		TopP:              src.TopP,
 		ParallelToolCalls: src.ParallelToolCalls,
+		Tools:             chatTools,
+	}
+	if src.Text != nil && shared.HasContent(src.Text.Format) {
+		out.ResponseFormat, eErr = shared.ResponsesTextFormatToChat(src.Text.Format)
+		if eErr != nil {
+			return nil, eErr
+		}
+	}
+	if src.Stream {
+		out.StreamOptions, eErr = responsesStreamOptions(src.StreamOptions)
+		if eErr != nil {
+			return nil, eErr
+		}
 	}
 	if src.MaxOutputTokens != nil && *src.MaxOutputTokens > 0 {
 		out.MaxTokens = src.MaxOutputTokens
@@ -325,11 +362,33 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		}
 		out.ReasoningEffort = strings.ToLower(strings.TrimSpace(src.Reasoning.Effort))
 	}
-	kind, tcName, eErr := shared.DecodeToolChoice(src.ToolChoice)
+	kind, tcName, tcNamespace, eErr := shared.DecodeToolChoiceIdentity(src.ToolChoice)
+	preserveRawToolChoice := false
 	if eErr != nil {
-		return nil, eErr
+		if compatibility == "strict" {
+			return nil, eErr
+		}
+		kind = shared.ToolChoiceAbsent
+		preserveRawToolChoice = len(chatTools) > 0 && shared.HasContent(src.ToolChoice)
 	}
-	applyToolChoiceCC(out, kind, tcName)
+	if compatibility != "strict" && hadToolDeclarations && len(chatTools) == 0 {
+		kind = shared.ToolChoiceAbsent
+	}
+	if kind == shared.ToolChoiceNamed {
+		identity, resolveErr := toolContext.ResolveCall(tcNamespace, tcName)
+		if resolveErr != nil {
+			if len(chatTools) != 0 || tcNamespace != "" {
+				return nil, resolveErr
+			}
+		} else {
+			tcName = identity.ChatName
+		}
+	}
+	if preserveRawToolChoice {
+		out.ToolChoice = src.ToolChoice
+	} else {
+		applyToolChoiceCC(out, kind, tcName)
+	}
 
 	addSystem := func(text string) {
 		if text != "" {
@@ -383,8 +442,12 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 				return nil, shared.ValidateRole(item.Role, EndpointPath)
 			}
 		case "function_call":
+			chatName, resolveErr := responsesCallChatName(toolContext, len(chatTools), item.Namespace, item.Name)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
 			tc := shared.CCToolCall{ID: item.CallID, Type: "function"}
-			tc.Function.Name = item.Name
+			tc.Function.Name = chatName
 			tc.Function.Arguments = shared.DefaultArgs(item.Arguments)
 			// Merge consecutive function_call items into one
 			// assistant message so multi-call turns round-trip.
@@ -398,7 +461,26 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			out.Messages = append(out.Messages, ccMessage{
 				Role: "assistant", ToolCalls: []shared.CCToolCall{tc},
 			})
-		case "function_call_output":
+		case "custom_tool_call":
+			identity, resolveErr := toolContext.ResolveCall(item.Namespace, item.Name)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			if identity.Kind != "custom" {
+				return nil, &errclass.Error{Class: errclass.ClassUnsupported, StatusCode: 400, Message: "custom tool call does not match a custom declaration"}
+			}
+			tc := shared.CCToolCall{ID: item.CallID, Type: "function"}
+			tc.Function.Name = identity.ChatName
+			tc.Function.Arguments = shared.WrapCustomToolInput(item.Input)
+			if n := len(out.Messages); n > 0 {
+				last := &out.Messages[n-1]
+				if last.Role == "assistant" && last.Content == nil {
+					last.ToolCalls = append(last.ToolCalls, tc)
+					continue
+				}
+			}
+			out.Messages = append(out.Messages, ccMessage{Role: "assistant", ToolCalls: []shared.CCToolCall{tc}})
+		case "function_call_output", "custom_tool_call_output":
 			text, eErr := shared.FunctionCallOutputText(item.Output)
 			if eErr != nil {
 				return nil, eErr
@@ -407,23 +489,76 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 				Role: "tool", Content: text, ToolCallID: item.CallID,
 			})
 		case "reasoning":
-			// omitted: no Chat Completions equivalent (FR-005 policy)
+			// Historical reasoning items remain omitted unless a future lane
+			// implements CPA's full session reasoning reconstruction.
+		case "additional_tools":
+			// Declaration carrier consumed by BuildResponsesToolContext; it is
+			// not conversational input and must not become a message.
 		default:
+			if compatibility != "strict" && isCPAIgnoredResponsesItem(item.Type) {
+				continue
+			}
 			return nil, shared.UnsupportedInputItemType(item.Type)
 		}
 	}
 
-	for _, t := range src.Tools {
-		if eErr := shared.FunctionTool(t.Type, EndpointPath); eErr != nil {
-			return nil, eErr
-		}
-		schema := shared.ObjectSchema(t.Parameters)
-		out.Tools = append(out.Tools, shared.CCTool{
-			Type:     "function",
-			Function: shared.CCFunction{Name: t.Name, Description: t.Description, Parameters: schema},
-		})
-	}
 	return encode(out), nil
+}
+
+func hasAdditionalToolDeclarations(input json.RawMessage) bool {
+	if !shared.HasContent(input) {
+		return false
+	}
+	var items []struct {
+		Type  string            `json:"type"`
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if json.Unmarshal(input, &items) != nil {
+		return false
+	}
+	for _, item := range items {
+		if item.Type == "additional_tools" && len(item.Tools) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func isCPAIgnoredResponsesItem(kind string) bool {
+	switch kind {
+	case "code_interpreter_call", "web_search_call", "file_search_call", "computer_call", "computer_call_output":
+		return true
+	}
+	return false
+}
+
+func responsesCallChatName(ctx shared.ResponsesToolContext, declarationCount int, namespace, name string) (string, *errclass.Error) {
+	identity, eErr := ctx.ResolveCall(namespace, name)
+	if eErr == nil {
+		return identity.ChatName, nil
+	}
+	if namespace == "" && !strings.Contains(eErr.Message, "ambiguous") {
+		return name, nil // historical flat function call without declarations
+	}
+	return "", eErr
+}
+
+func responsesStreamOptions(raw json.RawMessage) (json.RawMessage, *errclass.Error) {
+	if !shared.HasContent(raw) {
+		return json.RawMessage(`{"include_usage":true}`), nil
+	}
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &options); err != nil || options == nil {
+		return nil, errclass.Translation("stream_options must be an object or null")
+	}
+	include := true
+	if value, ok := options["include_usage"]; ok {
+		if err := json.Unmarshal(value, &include); err != nil {
+			return nil, errclass.Translation("stream_options.include_usage must be boolean")
+		}
+	}
+	out, _ := json.Marshal(map[string]bool{"include_usage": include})
+	return out, nil
 }
 
 // respContent normalizes a Responses content field (JSON string or typed

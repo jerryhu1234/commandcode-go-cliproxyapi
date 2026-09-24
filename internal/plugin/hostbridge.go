@@ -25,33 +25,62 @@ type RawCaller func(method string, payload []byte) ([]byte, error)
 // helpers. Callers must never place API keys, auth headers, prompts, or
 // tool args in Log messages or fields.
 type HostBridge struct {
-	call RawCaller
+	call           RawCaller
+	hostCallbackID string
 	// inFlight counts host-callback invocations whose goroutines may still
 	// run — including callbacks orphaned past their deadline and the
 	// abandon/drain cleanup spawned for them. handleShutdown waits on it
 	// because Unix loaders free host_api and dlclose the plugin as soon as
 	// the shutdown export returns; any goroutine still calling into the
 	// host after that would crash the process.
-	inFlight sync.WaitGroup
+	inFlight *sync.WaitGroup
 }
 
 // NewHostBridge wraps the injected raw host caller so the bridge satisfies
 // catalog.HostClient. main.go wires it to the C host API after init;
 // tests inject fakes.
 func NewHostBridge(call RawCaller) *HostBridge {
-	return &HostBridge{call: call}
+	return &HostBridge{call: call, inFlight: &sync.WaitGroup{}}
 }
 
 // hostHTTPReq is the wire shape accepted by host.http.do / do_stream.
 type hostHTTPReq struct {
-	Method  string      `json:"method"`
-	URL     string      `json:"url"`
-	Headers http.Header `json:"headers"`
-	Body    []byte      `json:"body"`
+	HostCallbackID string      `json:"host_callback_id,omitempty"`
+	Method         string      `json:"method"`
+	URL            string      `json:"url"`
+	Headers        http.Header `json:"headers"`
+	Body           []byte      `json:"body"`
+}
+
+// withHostCallbackID returns a request-scoped bridge that routes callbacks
+// through the host context opened for the current plugin RPC.
+func (b *HostBridge) withHostCallbackID(id string) *HostBridge {
+	if b == nil {
+		return nil
+	}
+	return &HostBridge{call: b.call, hostCallbackID: strings.TrimSpace(id), inFlight: b.inFlight}
 }
 
 type hostAuthListResponse struct {
 	Files []pluginapi.HostAuthFileEntry `json:"files"`
+}
+
+// AuthGet returns the persisted JSON for an exact host auth index. Quota uses
+// this when CPA omits StorageJSON from the provider request; the persisted
+// identity is the trust anchor, not the caller-selectable provider field.
+func (b *HostBridge) AuthGet(ctx context.Context, authIndex string) ([]byte, error) {
+	env, err := b.invoke(ctx, pluginabi.MethodHostAuthGet, struct {
+		AuthIndex      string `json:"auth_index"`
+		HostCallbackID string `json:"host_callback_id,omitempty"`
+	}{AuthIndex: authIndex, HostCallbackID: b.hostCallbackID}, "host auth get")
+	if err != nil {
+		return nil, err
+	}
+	var resp pluginapi.HostAuthGetResponse
+	if len(env.Result) == 0 || json.Unmarshal(env.Result, &resp) != nil || len(resp.JSON) == 0 {
+		return nil, fmt.Errorf("host auth get failed: credential storage unavailable")
+	}
+	return append([]byte(nil), resp.JSON...), nil
 }
 
 // hostLogReq is the wire shape accepted by host.log.
@@ -288,7 +317,8 @@ func (b *HostBridge) invoke(ctx context.Context, method string, payload any, wha
 // safe for logs (no keys, no response bodies).
 func (b *HostBridge) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
 	env, err := b.invoke(ctx, pluginabi.MethodHostHTTPDo, hostHTTPReq{
-		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
+		HostCallbackID: b.hostCallbackID,
+		Method:         req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
 	}, "host http do")
 	if err != nil {
 		return pluginapi.HTTPResponse{}, err

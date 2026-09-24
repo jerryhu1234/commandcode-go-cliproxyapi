@@ -55,6 +55,20 @@ func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	if c.MaxResponseBytes != 67108864 {
 		t.Errorf("MaxResponseBytes = %d", c.MaxResponseBytes)
 	}
+	if c.ResponsesCompatibility != "cpa" {
+		t.Errorf("ResponsesCompatibility = %q", c.ResponsesCompatibility)
+	}
+}
+
+func TestResponsesCompatibilityModes(t *testing.T) {
+	for _, mode := range []string{"cpa", "strict"} {
+		c, err := Load([]byte(withKey + "responses-compatibility: " + mode + "\n"))
+		if err != nil || c.ResponsesCompatibility != mode {
+			t.Fatalf("mode %s: %+v %v", mode, c, err)
+		}
+	}
+	_, err := Load([]byte(withKey + "responses-compatibility: unsafe\n"))
+	requireErrContains(t, err, "must be cpa or strict")
 }
 
 func TestLoadFullConfigHonorsEveryField(t *testing.T) {

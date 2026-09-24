@@ -1,6 +1,7 @@
 package chatcompletions
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -486,31 +487,31 @@ func TestStreamConverterResponses(t *testing.T) {
 
 	// The role chunk primes id/model and announces response.created (F18).
 	evs = feedAll(t, sc, `data: {"id":"r1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}`)
-	if len(evs) != 1 || evs[0].Name != "response.created" {
+	if len(evs) != 2 || evs[0].Name != "response.created" || evs[1].Name != "response.in_progress" {
 		t.Fatalf("first chunk must announce response.created: %v", evs)
 	}
 	if resp := evs[0].Data["response"].(map[string]any); resp["id"] != "r1" || resp["status"] != "in_progress" {
 		t.Fatalf("created payload wrong: %v", resp)
 	}
 	evs = feedAll(t, sc, `data: {"choices":[{"delta":{"content":"He"}}]}`)
-	if len(evs) != 2 || evs[0].Name != "response.output_item.added" || evs[1].Name != "response.output_text.delta" {
+	if len(evs) != 3 || evs[0].Name != "response.output_item.added" || evs[1].Name != "response.content_part.added" || evs[2].Name != "response.output_text.delta" {
 		t.Fatalf("text chunk must announce the message item first: %v", evs)
 	}
 	item := evs[0].Data["item"].(map[string]any)
 	if item["type"] != "message" || item["role"] != "assistant" || evs[0].Data["output_index"] != float64(0) {
 		t.Fatalf("message item wrong: %v", evs[0])
 	}
-	td := evs[1].Data
-	if td["item_id"] != "r1" || td["output_index"] != float64(0) || td["delta"] != "He" {
+	td := evs[2].Data
+	if td["item_id"] != "msg_r1_0" || td["content_index"] != float64(0) || td["output_index"] != float64(0) || td["delta"] != "He" {
 		t.Fatalf("output_text delta wrong: %v", evs[1])
 	}
 
 	// Tool call: registration chunk announces output_item.added (F18) after
 	// the message item's output_index, then argument fragments follow.
-	if evs = feedAll(t, sc, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":""}}]}}]}`); len(evs) != 1 || evs[0].Name != "response.output_item.added" {
+	if evs = feedAll(t, sc, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":""}}]}}]}`); len(evs) != 4 || evs[3].Name != "response.output_item.added" {
 		t.Fatalf("tool registration must announce the item first: %v", evs)
 	}
-	if evs[0].Data["output_index"] != float64(1) {
+	if evs[3].Data["output_index"] != float64(1) {
 		t.Fatalf("tool item must follow the message item's index: %v", evs[0])
 	}
 	evs = feedAll(t, sc,
@@ -537,10 +538,10 @@ func TestStreamConverterResponses(t *testing.T) {
 		t.Fatalf("response.completed must be deferred past finish_reason: %v", evs)
 	}
 	evs = feedAll(t, sc, `data: {"choices":[{"delta":{},"finish_reason":"length"}]}`)
-	if len(evs) != 1 || evs[0].Name != "response.completed" {
+	if len(evs) < 3 || evs[len(evs)-1].Name != "response.completed" {
 		t.Fatalf("completed event wrong: %v", evs)
 	}
-	resp := evs[0].Data["response"].(map[string]any)
+	resp := evs[len(evs)-1].Data["response"].(map[string]any)
 	if resp["id"] != "r1" || resp["object"] != "response" || resp["status"] != "completed" {
 		t.Fatalf("completed response wrong: %v", resp)
 	}
@@ -552,6 +553,242 @@ func TestStreamConverterResponses(t *testing.T) {
 	if _, done, eErr := sc.Feed([]byte("data: [DONE]\n")); eErr != nil || !done {
 		t.Fatalf("[DONE] must finish the stream: %v", eErr)
 	}
+}
+
+func TestResponsesTextLifecycleSDKShape(t *testing.T) {
+	sc := NewStreamConverter("openai-response")
+	events := feedAll(t, sc,
+		`data: {"id":"sdk","model":"m","choices":[{"delta":{"content":"a"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":"b"},"finish_reason":"stop"}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2}}`,
+		`data: [DONE]`)
+	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"}
+	if len(events) != len(want) {
+		t.Fatalf("events=%v", events)
+	}
+	var last float64
+	for i, event := range events {
+		if event.Name != want[i] {
+			t.Fatalf("event %d=%s want %s", i, event.Name, want[i])
+		}
+		seq := event.Data["sequence_number"].(float64)
+		if seq <= last {
+			t.Fatalf("sequence %v after %v", seq, last)
+		}
+		last = seq
+	}
+	created := events[0].Data["response"].(map[string]any)
+	if len(created["output"].([]any)) != 0 {
+		t.Fatalf("created=%v", created)
+	}
+	added := events[2].Data["item"].(map[string]any)
+	itemID := added["id"].(string)
+	if itemID == "sdk" || added["status"] != "in_progress" {
+		t.Fatalf("added=%v", added)
+	}
+	for _, idx := range []int{3, 4, 5, 6, 7} {
+		if events[idx].Data["item_id"] != itemID || events[idx].Data["content_index"] != float64(0) {
+			t.Fatalf("reference mismatch: %v", events[idx])
+		}
+	}
+	done := events[8].Data["item"].(map[string]any)
+	if done["id"] != itemID || done["status"] != "completed" {
+		t.Fatalf("done=%v", done)
+	}
+	completed := events[9].Data["response"].(map[string]any)
+	output := completed["output"].([]any)[0].(map[string]any)
+	if output["id"] != itemID || output["status"] != "completed" || output["content"].([]any)[0].(map[string]any)["text"] != "ab" {
+		t.Fatalf("completed=%v", completed)
+	}
+}
+
+func TestResponsesAlternatingSegmentsKeepDistinctItems(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		chunks    []string
+		wantTypes []string
+	}{
+		{"text tool text", []string{
+			`data: {"id":"alt","model":"m","choices":[{"delta":{"content":"a"}}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":"{}"}}]}}]}`,
+			`data: {"choices":[{"delta":{"content":"b"},"finish_reason":"stop"}]}`,
+		}, []string{"message", "function_call", "message"}},
+		{"reason text reason", []string{
+			`data: {"id":"alt","model":"m","choices":[{"delta":{"reasoning":"r1"}}]}`,
+			`data: {"choices":[{"delta":{"content":"t"}}]}`,
+			`data: {"choices":[{"delta":{"reasoning":"r2"},"finish_reason":"stop"}]}`,
+		}, []string{"reasoning", "message", "reasoning"}},
+		{"text reason text", []string{
+			`data: {"id":"alt","model":"m","choices":[{"delta":{"content":"a"}}]}`,
+			`data: {"choices":[{"delta":{"reasoning":"r"}}]}`,
+			`data: {"choices":[{"delta":{"content":"b"},"finish_reason":"stop"}]}`,
+		}, []string{"message", "reasoning", "message"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := NewStreamConverter("openai-response")
+			var all []sseEvt
+			for _, chunk := range tc.chunks {
+				all = append(all, feedAll(t, sc, chunk)...)
+			}
+			all = append(all, feedAll(t, sc, `data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`, `data: [DONE]`)...)
+			var added, done []string
+			var completed map[string]any
+			last := float64(0)
+			for _, event := range all {
+				seq := event.Data["sequence_number"].(float64)
+				if seq <= last {
+					t.Fatalf("sequence %v", all)
+				}
+				last = seq
+				switch event.Name {
+				case "response.output_item.added":
+					added = append(added, event.Data["item"].(map[string]any)["type"].(string))
+				case "response.output_item.done":
+					done = append(done, event.Data["item"].(map[string]any)["type"].(string))
+				case "response.completed":
+					completed = event.Data["response"].(map[string]any)
+				}
+			}
+			if strings.Join(added, ",") != strings.Join(tc.wantTypes, ",") || len(done) != len(tc.wantTypes) {
+				t.Fatalf("added=%v done=%v", added, done)
+			}
+			output := completed["output"].([]any)
+			var got []string
+			for _, item := range output {
+				got = append(got, item.(map[string]any)["type"].(string))
+			}
+			if strings.Join(got, ",") != strings.Join(tc.wantTypes, ",") {
+				t.Fatalf("output=%v", output)
+			}
+		})
+	}
+}
+
+func TestResponsesToolArgumentsCanSpanOtherSegments(t *testing.T) {
+	for _, middle := range []string{
+		`data: {"choices":[{"delta":{"content":"middle"}}]}`,
+		`data: {"choices":[{"delta":{"reasoning":"middle"}}]}`,
+	} {
+		sc := NewStreamConverter("openai-response")
+		events := feedAll(t, sc,
+			`data: {"id":"span","model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":"{\"x\":"}}]}}]}`,
+			middle,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":"tool_calls"}]}`,
+			`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`, `data: [DONE]`)
+		var completed map[string]any
+		doneCount := 0
+		for _, event := range events {
+			if event.Name == "response.output_item.done" && event.Data["item"].(map[string]any)["type"] == "function_call" {
+				doneCount++
+			}
+			if event.Name == "response.completed" {
+				completed = event.Data["response"].(map[string]any)
+			}
+		}
+		if doneCount != 1 {
+			t.Fatalf("done count=%d events=%v", doneCount, events)
+		}
+		found := false
+		for _, raw := range completed["output"].([]any) {
+			item := raw.(map[string]any)
+			if item["type"] == "function_call" {
+				found = true
+				if item["arguments"] != `{"x":1}` {
+					t.Fatalf("arguments=%v", item)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing function")
+		}
+	}
+}
+
+func TestResponsesToolCompletionGuards(t *testing.T) {
+	t.Run("fragment after terminal done is ignored", func(t *testing.T) {
+		sc := NewStreamConverter("openai-response")
+		feedAll(t, sc, `data: {"id":"x","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`, `data: [DONE]`)
+		events, done, e := sc.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"secret"}}]}}]}` + "\n"))
+		if e != nil || !done || len(events) != 0 {
+			t.Fatalf("events=%v done=%v error=%v", events, done, e)
+		}
+	})
+	t.Run("mixed complete incomplete fails without completed", func(t *testing.T) {
+		sc := NewStreamConverter("openai-response")
+		events, _, e := sc.Feed([]byte(`data: {"id":"x","choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"a","arguments":"{}"}},{"index":1,"id":"b","function":{"name":"b","arguments":"{\"x\":"}}]},"finish_reason":"tool_calls"}]}` + "\n"))
+		if e == nil {
+			t.Fatal("expected incomplete error")
+		}
+		if strings.Contains(string(bytes.Join(events, nil)), "response.completed") {
+			t.Fatal("false completed")
+		}
+	})
+}
+
+func TestResponsesTerminalValidationDONEAndEOF(t *testing.T) {
+	for _, end := range []string{"done", "eof"} {
+		for _, tc := range []struct {
+			name   string
+			chunks []string
+		}{
+			{"incomplete function", []string{`data: {"id":"x","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":"{\"x\":"}}]}}]}`}},
+			{"incomplete custom", []string{`data: {"id":"x","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"custom","arguments":"{\"input\":"}}]}}]}`}},
+			{"unannounced prefix", []string{`data: {"id":"x","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"pre","arguments":"{}"}}]}}]}`}},
+		} {
+			t.Run(end+" "+tc.name, func(t *testing.T) {
+				sc := NewStreamConverter("openai-response", []byte(`{"tools":[{"type":"custom","name":"custom"},{"type":"function","name":"prefix_long"}]}`))
+				var emitted [][]byte
+				for _, chunk := range tc.chunks {
+					events, _, e := sc.Feed([]byte(chunk + "\n"))
+					if e != nil {
+						t.Fatal(e)
+					}
+					emitted = append(emitted, events...)
+				}
+				var e *errclass.Error
+				if end == "done" {
+					events, _, err := sc.Feed([]byte("data: [DONE]\n"))
+					emitted = append(emitted, events...)
+					e = err
+				} else {
+					events, err := sc.FlushWithError()
+					emitted = append(emitted, events...)
+					e = err
+				}
+				if e == nil || strings.Contains(e.Message, "{\"x\"") || strings.Contains(string(bytes.Join(emitted, nil)), "response.completed") {
+					t.Fatalf("error=%v emitted=%s", e, bytes.Join(emitted, nil))
+				}
+			})
+		}
+	}
+	for _, end := range []string{"done", "eof"} {
+		t.Run("complete without finish "+end, func(t *testing.T) {
+			sc := NewStreamConverter("openai-response")
+			events, _, e := sc.Feed([]byte(`data: {"id":"x","choices":[{"delta":{"content":"ok"}}]}` + "\n"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			var terminal [][]byte
+			if end == "done" {
+				more, _, err := sc.Feed([]byte("data: [DONE]\n"))
+				terminal = more
+				e = err
+			} else {
+				terminal, e = sc.FlushWithError()
+			}
+			all := append(events, terminal...)
+			if e != nil || !strings.Contains(string(bytes.Join(all, nil)), "response.completed") {
+				t.Fatalf("error=%v events=%s", e, bytes.Join(all, nil))
+			}
+		})
+	}
+	t.Run("empty stream fixed error", func(t *testing.T) {
+		sc := NewStreamConverter("openai-response")
+		_, e := sc.FlushWithError()
+		if e == nil || e.Message != "Responses stream ended without any response events" {
+			t.Fatalf("error=%v", e)
+		}
+	})
 }
 
 func TestStreamConverterResponsesVariants(t *testing.T) {
@@ -788,7 +1025,7 @@ func TestStreamResponsesCompletedOutputText(t *testing.T) {
 		t.Fatalf("output = %v", completed["output"])
 	}
 	item := output[0].(map[string]any)
-	if item["type"] != "message" || item["role"] != "assistant" || item["id"] != "r9" {
+	if item["type"] != "message" || item["role"] != "assistant" || item["id"] != "msg_r9_0" || item["status"] != "completed" {
 		t.Fatalf("message item wrong: %v", item)
 	}
 	content := item["content"].([]any)
@@ -879,7 +1116,7 @@ func TestStreamResponsesToolsBeforeTextTerminalOrderMatchesAnnouncements(t *test
 		t.Fatalf("terminal output[0] must be the announced function_call: %v", output[0])
 	}
 	termMsg, ok := output[1].(map[string]any)
-	if !ok || termMsg["type"] != "message" || termMsg["id"] != "rt" {
+	if !ok || termMsg["type"] != "message" || termMsg["id"] != "msg_rt_1" {
 		t.Fatalf("terminal output[1] must be the announced message: %v", output[1])
 	}
 	content := termMsg["content"].([]any)
@@ -944,10 +1181,10 @@ func TestStreamConverterFlushAfterFinishWithoutDONE(t *testing.T) {
 			`data: {"id":"r2","choices":[{"delta":{"role":"assistant","content":"x"}}]}`,
 			`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
 		flushed := parseEvents(t, sc.Flush())
-		if len(flushed) != 1 || flushed[0].Name != "response.completed" {
+		if len(flushed) != 4 || flushed[len(flushed)-1].Name != "response.completed" {
 			t.Fatalf("flush = %v", flushed)
 		}
-		resp := flushed[0].Data["response"].(map[string]any)
+		resp := flushed[len(flushed)-1].Data["response"].(map[string]any)
 		u := resp["usage"].(map[string]any)
 		if u["input_tokens"] != float64(3) || u["output_tokens"] != float64(4) {
 			t.Fatalf("flushed completed usage wrong: %v", resp)

@@ -27,11 +27,37 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test quota page authentication
+        run: node --test tests/quota_page_auth.test.js
+
       - name: Test
         run: go test ./...
 
+      - name: Test release packaging
+        run: go test ./.github/scripts
+
       - name: Vet
         run: go vet ./...
+
+      - name: Checkout CPA v7.3.15 host
+        uses: actions/checkout@v5
+        with:
+          repository: router-for-me/CLIProxyAPI
+          ref: v7.3.15
+          path: .ci/cliproxyapi-v7.3.15
+
+      - name: Test native plugin in CPA host
+        env:
+          CPA_SOURCE: ${{ github.workspace }}/.ci/cliproxyapi-v7.3.15
+          GO_BIN: go
+          CPA_HOST_WORK: ${{ runner.temp }}/commandcode-cpa-host
+          GO_WORK_ROOT: ${{ runner.temp }}/commandcode-go
+        run: bash tests/cpa_host_integration.sh
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -80,9 +106,11 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-dev"
+            VERSION="0.2.0-dev.5"
           fi
+          COMMIT="${GITHUB_SHA:0:12}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "COMMIT=${COMMIT}" >> "${GITHUB_ENV}"
           echo "LIB_NAME=${PLUGIN_ID}.${{ matrix.ext }}" >> "${GITHUB_ENV}"
           echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
 
@@ -92,7 +120,7 @@ jobs:
           mkdir -p dist
           CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             go build -trimpath -buildmode=c-shared \
-              -ldflags "-s -w" \
+              -ldflags "-s -w -X commandcode-go-cliproxyapi/internal/buildinfo.Version=${VERSION} -X commandcode-go-cliproxyapi/internal/buildinfo.Commit=${COMMIT}" \
               -o "dist/${LIB_NAME}" .
           rm -f "dist/${PLUGIN_ID}.h"
 
@@ -111,6 +139,7 @@ jobs:
           path: |
             ${{ env.ARCHIVE_NAME }}
             ${{ env.ARCHIVE_NAME }}.sha256
+            ${{ env.ARCHIVE_NAME }}.provenance.json
           if-no-files-found: error
 
   build-windows-arm64:
@@ -137,9 +166,11 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-dev"
+            VERSION="0.2.0-dev.5"
           fi
+          COMMIT="${GITHUB_SHA:0:12}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "COMMIT=${COMMIT}" >> "${GITHUB_ENV}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_windows_arm64.zip" >> "${GITHUB_ENV}"
 
@@ -154,7 +185,7 @@ jobs:
           targets: windows-arm64
           out-dir: dist/windows-arm64
           output: ${{ env.PLUGIN_ID }}.dll
-          flags: -ldflags=-s -w
+          flags: -ldflags=-s -w -X commandcode-go-cliproxyapi/internal/buildinfo.Version=${{ env.VERSION }} -X commandcode-go-cliproxyapi/internal/buildinfo.Commit=${{ env.COMMIT }}
 
       - name: Package plugin
         run: |
@@ -172,6 +203,7 @@ jobs:
           path: |
             ${{ env.ARCHIVE_NAME }}
             ${{ env.ARCHIVE_NAME }}.sha256
+            ${{ env.ARCHIVE_NAME }}.provenance.json
           if-no-files-found: error
 
   build-freebsd:
@@ -204,9 +236,11 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-dev"
+            VERSION="0.2.0-dev.5"
           fi
+          COMMIT="${GITHUB_SHA:0:12}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "COMMIT=${COMMIT}" >> "${GITHUB_ENV}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_freebsd_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
 
@@ -227,7 +261,7 @@ jobs:
           targets: freebsd-${{ matrix.goarch }}
           out-dir: dist/freebsd-${{ matrix.goarch }}
           output: ${{ env.PLUGIN_ID }}.so
-          flags: -ldflags=-s -w
+          flags: -ldflags=-s -w -X commandcode-go-cliproxyapi/internal/buildinfo.Version=${{ env.VERSION }} -X commandcode-go-cliproxyapi/internal/buildinfo.Commit=${{ env.COMMIT }}
 
       - name: Package plugin
         run: |
@@ -245,6 +279,7 @@ jobs:
           path: |
             ${{ env.ARCHIVE_NAME }}
             ${{ env.ARCHIVE_NAME }}.sha256
+            ${{ env.ARCHIVE_NAME }}.provenance.json
           if-no-files-found: error
 
   release:
@@ -273,9 +308,9 @@ jobs:
           set -euo pipefail
           sort dist/*.sha256 > dist/checksums.txt
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/*.provenance.json dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
           else
-            gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt \
+            gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/*.provenance.json dist/checksums.txt \
               --repo "${GITHUB_REPOSITORY}" \
               --verify-tag \
               --title "${GITHUB_REF_NAME}" \

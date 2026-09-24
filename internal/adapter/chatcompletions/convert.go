@@ -50,7 +50,7 @@ type ccResponse struct {
 // preserving text, tool calls, finish reason, usage, and vendor thinking
 // text (thinking block / reasoning item). Unknown formats are
 // ClassUnsupported; malformed upstream bodies are ClassTranslation.
-func ConvertNonStreamResponse(sourceFormat string, status int, upstreamBody []byte) ([]byte, *errclass.Error) {
+func ConvertNonStreamResponse(sourceFormat string, status int, upstreamBody []byte, originalRequest ...[]byte) ([]byte, *errclass.Error) {
 	if status >= 400 {
 		return nil, shared.UpstreamStatusError(status, upstreamBody)
 	}
@@ -60,7 +60,7 @@ func ConvertNonStreamResponse(sourceFormat string, status int, upstreamBody []by
 	case "claude":
 		return chatToClaude(upstreamBody)
 	case "openai-response":
-		return chatToResponses(upstreamBody)
+		return chatToResponses(upstreamBody, responseToolContext(originalRequest))
 	default:
 		return nil, shared.UnsupportedFormat(sourceFormat, EndpointPath)
 	}
@@ -176,7 +176,7 @@ func claudeToolUseBlocks(calls []shared.CCToolCall) ([]claudeBlock, *errclass.Er
 // usage (FR-006). Vendor thinking text leads as a reasoning item carrying
 // one summary_text part, the shape and position the streaming synthesizer
 // emits (mode parity).
-func chatToResponses(body []byte) ([]byte, *errclass.Error) {
+func chatToResponses(body []byte, toolContext shared.ResponsesToolContext) ([]byte, *errclass.Error) {
 	resp, eErr := decodeCC(body)
 	if eErr != nil {
 		return nil, eErr
@@ -220,7 +220,24 @@ func chatToResponses(body []byte) ([]byte, *errclass.Error) {
 		oa.ReserveTextSlot()
 	}
 	for _, tc := range choice.Message.ToolCalls {
-		oa.AppendFunctionCall(tc.ID, tc.Function.Name, shared.DefaultArgs(tc.Function.Arguments))
+		identity, declared := toolContext.ResolveChatName(tc.Function.Name)
+		if declared && identity.Kind == "custom" {
+			input, eErr := shared.UnwrapCustomToolInput(tc.Function.Arguments)
+			if eErr != nil {
+				return nil, eErr
+			}
+			oa.AppendCustomToolCallWithNamespace(tc.ID, identity.Name, identity.Namespace, input)
+		} else {
+			name := tc.Function.Name
+			if declared {
+				name = identity.Name
+			}
+			namespace := ""
+			if declared {
+				namespace = identity.Namespace
+			}
+			oa.AppendFunctionCallWithNamespace(tc.ID, name, namespace, shared.DefaultArgs(tc.Function.Arguments))
+		}
 	}
 	out.Output = oa.Render()
 	if resp.Usage != nil {
@@ -235,4 +252,11 @@ func chatToResponses(body []byte) ([]byte, *errclass.Error) {
 	}
 	b, _ := json.Marshal(out) // only marshallable composed types; cannot fail
 	return b, nil
+}
+
+func responseToolContext(originalRequest [][]byte) shared.ResponsesToolContext {
+	if len(originalRequest) == 0 {
+		return shared.NewResponsesToolContext(nil)
+	}
+	return shared.NewResponsesToolContext(originalRequest[0])
 }

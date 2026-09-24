@@ -29,6 +29,17 @@ func main() {
 	if errWrite := os.WriteFile(*checksumPath, []byte(line), 0o644); errWrite != nil {
 		fatalf("write checksum: %v", errWrite)
 	}
+	version := os.Getenv("VERSION")
+	commit := os.Getenv("COMMIT")
+	if version == "" || commit == "" {
+		fatalf("VERSION and COMMIT are required")
+	}
+	provenancePath := *archivePath + ".provenance.json"
+	provenance := fmt.Sprintf("{\n  \"version\": %q,\n  \"commit\": %q,\n  \"archive\": %q,\n  \"sha256\": %q\n}\n",
+		version, commit, filepath.Base(*archivePath), hex.EncodeToString(checksum[:]))
+	if errWrite := os.WriteFile(provenancePath, []byte(provenance), 0o644); errWrite != nil {
+		fatalf("write provenance: %v", errWrite)
+	}
 }
 
 func packageLibrary(libraryPath, archivePath string) ([]byte, error) {

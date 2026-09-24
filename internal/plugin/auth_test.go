@@ -53,6 +53,45 @@ func TestAuthProviderAliasesAndFilenameFallback(t *testing.T) {
 	}
 }
 
+func TestAuthProviderFileBackedDefersCanonicalIDToHost(t *testing.T) {
+	p := authProvider{}
+	raw := []byte(`{"type":"commandcode","id":"commandcode-key-H","api_key":"sk-file-key","email":"file@example.test"}`)
+	parsed, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+		Provider: ProviderID,
+		Path:     "/auth/commandcode-key-H.json",
+		FileName: "commandcode-key-H.json",
+		RawJSON:  raw,
+	})
+	if err != nil || !parsed.Handled {
+		t.Fatalf("file-backed parse = %#v, err=%v", parsed, err)
+	}
+	if parsed.Auth.ID != "" {
+		t.Fatalf("file-backed ID = %q, want empty for host path canonicalization", parsed.Auth.ID)
+	}
+	if parsed.Auth.FileName != "commandcode-key-H.json" || parsed.Auth.Attributes["api_key"] != "sk-file-key" || parsed.Auth.Metadata["email"] != "file@example.test" || string(parsed.Auth.StorageJSON) != string(raw) {
+		t.Fatalf("file-backed fields changed: %#v", parsed.Auth)
+	}
+}
+
+func TestAuthProviderNonFileKeepsLegacyIdentity(t *testing.T) {
+	p := authProvider{}
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "json id", raw: `{"type":"commandcode","id":"stable-json-id","api_key":"sk-memory-key"}`, want: "stable-json-id"},
+		{name: "filename fallback", raw: `{"type":"commandcode","api_key":"sk-memory-key"}`, want: "memory.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{FileName: "memory.json", RawJSON: []byte(tc.raw)})
+			if err != nil || !parsed.Handled || parsed.Auth.ID != tc.want {
+				t.Fatalf("non-file parse = %#v, err=%v, want ID %q", parsed, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestAuthProviderMalformedRecognizedInput(t *testing.T) {
 
 	p := authProvider{}

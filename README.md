@@ -48,13 +48,14 @@ Without this plugin, using a CommandCode Go/GOAT/Pro/Max plan in CLIProxyAPI req
   - OpenAI clients get `reasoning_content` backfilled onto each chunk while the vendor fields stay intact.
 - **Capability-aware Reasoning Controls**: an explicit `route-overrides` declaration (or catalog thinking metadata) re-enables eager validation and clamping; with nothing declared, the client's `reasoning_effort` is forwarded verbatim (`auto`/`none` omit the field) and the upstream is the authority.
 - **Dynamic Catalog Discovery**: remote catalog with local fallback, deduplication, and diagnostics for what was excluded.
-- **CommandCode Quota Page**: a Management Center page listing every configured credential with its account email, plan, remaining plan credits, and the rolling 5-hour/weekly windows (used, cap, reset time), refreshed per card on demand.
+- **Native and legacy quota**: CPA 7.3.15's native QuotaProvider and the legacy Management Center page share the same account fetch and normalization logic. Reset is not supported.
 - **Multi-Key Auth Scheduling**: one key pool shared across all protocols through CLIProxyAPI's native scheduler.
 
 ## Requirements
 
-- **CLIProxyAPI**: `v7.2.138+`
-- **Go Toolchain**: Go 1.26+ (CGO enabled for `-buildmode=c-shared`)
+- **CLIProxyAPI**: exactly `v7.3.15` for the 0.2.0 development target (plugin ABI 1, schema 6)
+- **Management Center**: `1.13.x`
+- **Go Toolchain**: Go 1.26.7 (CGO enabled for `-buildmode=c-shared`)
 
 ## Build
 
@@ -146,6 +147,30 @@ The `CommandCode Quota` page (Management Center → plugins) reads the account s
 
 `{authority}` is derived from `base-url` by trimming its provider path (`/provider/v1`). Each card is refreshed manually and independently; the page never polls, and quota values never influence routing.
 
+The legacy page must be opened from the same origin as Management Center. It reads Management Center's remembered credential formats `enc::v1::` and `enc::v2::`; a cross-origin iframe is intentionally rejected before any quota request. Native quota and the page are read-only. Quota reset, OAuth login, and token counting remain unsupported.
+
+## Upgrade to the 0.2.0 development build
+
+0.2.0 has not been released yet. Pin CPA to v7.3.15 and Management Center to 1.13.x before testing this development build. Current development artifacts identify themselves as `0.2.0-dev.5`; they are not a formal release. See [the protocol capability matrix](docs/protocol-capabilities.md) for the exact custom tool, namespace, structured-output, and option-policy boundaries.
+
+The Chat Completions route now preserves flat Responses custom tools such as
+`apply_patch` across request, streaming/non-streaming call, and subsequent
+`custom_tool_call_output` replay. Custom identity comes only from the original
+request; an ordinary function is never guessed to be custom from its arguments.
+By default (`responses-compatibility: cpa`) Responses-to-Chat conversion follows
+CPA v7.3.15: unsupported hosted built-ins are skipped, and custom grammar is
+downgraded to freeform text rather than executed. Set
+`responses-compatibility: strict` in the plugin YAML to retain the dev.3
+fail-closed policy for unsupported/stateful options. Neither mode makes this
+plugin a hosted code interpreter, search service, file store, or computer tool.
+
+1. Stop CLIProxyAPI. Do not replace a loaded native library in place.
+2. Back up the existing plugin file outside every configured plugin scan directory. A backup left under `plugins/`, including an old versioned `.so`/`.dll`/`.dylib`, may still be discovered.
+3. Verify the archive checksum, extract it, and confirm the runtime filename is `commandcode-go-cliproxyapi.<platform extension>`.
+4. Compare the adjacent `*.provenance.json` version, commit, archive name, and SHA-256 with the selected release artifact.
+5. Replace the old runtime file while CPA is stopped, then restart CPA and verify the registered plugin reports version `0.2.0-dev.5` (or the final tag version once released).
+6. If rollback is needed, stop CPA, remove the new file, restore the backed-up runtime from outside the scan directory, and restart.
+
 ### Reasoning effort
 
 CommandCode publishes **no capability API**: `{base-url}/models` returns only `id`, `object`, `created`, `owned_by`, `name` and `context_length`, and its `/alpha/*` account surface has no models or capabilities route. The per-model effort lists that exist live inside the vendor's own clients (the `command-code` CLI and the web app both ship a static table), and the upstream gateway itself accepts every value in the union `low | medium | high | xhigh | max` regardless of the per-model list.
@@ -159,10 +184,69 @@ Consequences for this plugin:
 ## Testing
 
 ```bash
-go test ./...        # unit + mocked end-to-end tests
-go test ./... -cover # with coverage
-go vet ./...         # vetting
+go test ./...
+go test ./.github/scripts
+go test -race ./internal/plugin
+go vet ./...
+
+# Real CPA v7.3.15 dynamic-loader and watcher integration. All paths are caller supplied;
+# HTTP(S)_PROXY may be set on this command if the CPA checkout needs downloads.
+CPA_SOURCE=/path/to/CLIProxyAPI-v7.3.15 \
+GO_BIN=/path/to/go1.26.7/bin/go \
+CPA_HOST_WORK=/tmp \
+GO_WORK_ROOT=/tmp \
+bash tests/cpa_host_integration.sh
 ```
+
+`CPA_HOST_WORK` and `GO_WORK_ROOT` are parent directories, not disposable
+workspace paths. The script creates uniquely named child directories with
+`mktemp` and removes only those children. It also creates an exclusive temporary
+subdirectory inside `CPA_SOURCE` for the Go harness so internal CPA packages are
+importable; pre-existing checkout files are never overwritten or removed.
+
+### Browser acceptance
+
+The quota page has two real-browser acceptance layers. Both use only fake
+management credentials and mocked CPA HTTP/upstream responses; neither sends a
+real CommandCode request.
+
+1. `tests/quota_page_browser_harness.js` was run in Microsoft Edge 148 with an
+   isolated browser profile. Its iframe fixture passes 9/9 cases: plaintext,
+   `enc::v1::`, and `enc::v2::` auth; missing and malformed storage; redacted
+   401/403 errors; cross-origin refusal with no request; and recovery after
+   sign-in plus iframe refresh.
+2. `tests/quota_page_full_manager_browser_harness.js` runs the actual CPAMP
+   1.13.0 release `management.html`, SHA-256
+   `5974f172549a5d5f5b34a2c9a9c1e60f413bc963f799e430aacd4dd8e0a4eaac`
+   (source revision `ff361648f0b6d54bb678ae555cd86169142635d0`). It passes
+   3/3 checks through the real login form and Remember password checkbox:
+   persisted v2 storage, plugin discovery/menu and the real plugin resource
+   iframe route, then fake Bearer authorization and rendered 25%/50% quota
+   values.
+
+Install `playwright-core` outside this repository, launch a Chromium-compatible
+browser with remote debugging and an isolated profile, then pass its CDP URL:
+
+```bash
+NODE_PATH=/path/to/external/playwright-core/node_modules \
+node tests/quota_page_browser_harness.js \
+  --cdp http://127.0.0.1:PORT
+
+NODE_PATH=/path/to/external/playwright-core/node_modules \
+node tests/quota_page_full_manager_browser_harness.js \
+  --cdp http://127.0.0.1:PORT \
+  --manager /path/to/verified/cpamp-1.13.0/management.html
+```
+
+The full-Manager harness is a real frontend release acceptance test, but its CPA
+HTTP endpoints and CommandCode upstream are mocked. Separately,
+`tests/cpa_host_integration.sh` loads the built shared library through the real
+CPA v7.3.15 pluginhost and auth-directory watcher. It validates canonical
+file-backed identity across initial save, email atomic replacement,
+reconfiguration, and watcher restart, plus registration, execution, quota, management
+routes, and shutdown; it is not a complete CPA server process. Real CommandCode
+production traffic and a user's deployed CPA/Manager topology still require
+deployment acceptance testing.
 
 ## Provenance
 

@@ -62,6 +62,11 @@ type responsesEnvelope struct {
 	Stream            bool              `json:"stream,omitempty"`
 	Temperature       *float64          `json:"temperature,omitempty"`
 	TopP              *float64          `json:"top_p,omitempty"`
+	Text              *responsesText    `json:"text,omitempty"`
+}
+
+type responsesText struct {
+	Format json.RawMessage `json:"format"`
 }
 
 func msgItem(role string, parts []map[string]any) map[string]any {
@@ -139,13 +144,32 @@ func contentParts(raw json.RawMessage, role string) ([]map[string]any, *errclass
 //
 // Explicit omission policy (FR-005 "where compatible"): `stop` has no
 // Responses equivalent and is dropped, as are sampling/extras without an
-// equivalent (logprobs, frequency_penalty, presence_penalty, n, seed,
-// response_format, logit_bias) via struct selection. Tool calls and
-// reasoning controls are never dropped silently.
+// equivalent (logprobs, frequency_penalty, presence_penalty, seed and
+// logit_bias) via struct selection. response_format maps to text.format;
+// n=1 is accepted and n>1 is rejected because Responses cannot represent
+// multiple choices. Tool calls and reasoning controls are never dropped
+// silently.
 func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
 	var src shared.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &src); err != nil {
 		return nil, errclass.Translation("malformed openai request JSON: " + err.Error())
+	}
+	// n is intentionally decoded locally so the shared request shape need not
+	// grow a field used only by this cross-protocol target.
+	var local struct {
+		N json.RawMessage `json:"n"`
+	}
+	if err := json.Unmarshal(body, &local); err != nil {
+		return nil, errclass.Translation("malformed openai request JSON: " + err.Error())
+	}
+	if shared.HasContent(local.N) && string(local.N) != "null" {
+		var n int64
+		if err := json.Unmarshal(local.N, &n); err != nil || n < 1 {
+			return nil, errclass.Translation("Chat Completions n must be a positive integer")
+		}
+		if n > 1 {
+			return nil, &errclass.Error{Class: errclass.ClassUnsupported, Message: "Chat Completions n greater than 1 is not supported by the Responses API"}
+		}
 	}
 	req := &responsesEnvelope{
 		Model:             upstreamModel,
@@ -153,6 +177,13 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 		Temperature:       src.Temperature,
 		TopP:              src.TopP,
 		ParallelToolCalls: src.ParallelToolCalls,
+	}
+	format, eErr := shared.ChatResponseFormatToResponses(src.ResponseFormat)
+	if eErr != nil {
+		return nil, eErr
+	}
+	if format != nil {
+		req.Text = &responsesText{Format: format}
 	}
 	kind, tcName, eErr := shared.DecodeToolChoice(src.ToolChoice)
 	if eErr != nil {
@@ -253,6 +284,7 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
 			Parameters:  shared.ObjectSchema(t.Function.Parameters),
+			Strict:      t.Function.Strict,
 		})
 	}
 	b, _ := json.Marshal(req) // only marshallable composed types; cannot fail

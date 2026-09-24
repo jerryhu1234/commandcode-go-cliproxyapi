@@ -527,6 +527,201 @@ func TestExecuteResponsesRouteNativePassesThrough(t *testing.T) {
 	}
 }
 
+func TestExecutorResponsesCustomToolContextNonStream(t *testing.T) {
+	customRequest := []byte(`{"model":"x","tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"lookup","parameters":{"type":"object"}}],"input":"fix"}`)
+	upstreamResponse := `{"id":"r-custom","model":"glm-5.3","choices":[{"message":{"tool_calls":[{"id":"c-custom","type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n+x\\\\y\\\"z☃\"}"}},{"id":"c-fn","type":"function","function":{"name":"lookup","arguments":"{\"q\":1}"}}]},"finish_reason":"tool_calls"}]}`
+	f := &fakeCaller{}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	f.responder = wrapWithCatalog(multiRouteCatalog, upstreamRouter(t, map[string]string{"/v1/chat/completions": upstreamResponse}))
+	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML+testRouteOverrides)); err != nil {
+		t.Fatal(err)
+	}
+	env := mustExecute(t, m, "glm-5.3", "openai-response", customRequest)
+	if !env.OK {
+		t.Fatalf("execute = %+v", env.Error)
+	}
+	var response pluginapi.ExecutorResponse
+	if err := json.Unmarshal(env.Result, &response); err != nil {
+		t.Fatal(err)
+	}
+	text := string(response.Payload)
+	for _, want := range []string{`"type":"custom_tool_call"`, `"call_id":"c-custom"`, `"input":"*** Begin Patch\n+x\\y\"z☃"`, `"type":"function_call"`, `"call_id":"c-fn"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %s in %s", want, text)
+		}
+	}
+	upstream := wireBody(t, lastWire(t, f, pluginabi.MethodHostHTTPDo), "body")
+	if !strings.Contains(string(upstream), `"required":["input"]`) {
+		t.Fatalf("custom schema missing upstream: %s", upstream)
+	}
+}
+
+func TestExecutorResponsesCustomToolContextPayloadFallbackAndConservativeNoTools(t *testing.T) {
+	response := `{"id":"r","choices":[{"message":{"tool_calls":[{"id":"c","function":{"name":"apply_patch","arguments":"{\"input\":\"x\"}"}}]},"finish_reason":"tool_calls"}]}`
+	for _, tc := range []struct {
+		name              string
+		original, payload []byte
+		want              string
+	}{
+		{name: "valid payload fallback", original: []byte(`not-json`), payload: []byte(`{"tools":[{"type":"custom","name":"apply_patch"}],"input":"x"}`), want: `"type":"custom_tool_call"`},
+		{name: "no tools conservative", original: []byte(`{"input":"x"}`), payload: []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`), want: `"type":"function_call"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := responsesRequestContext(executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{SourceFormat: "openai-response", OriginalRequest: tc.original, Payload: tc.payload}})
+			out, e := convertNonStream(catalog.RouteChatCompletions, "openai-response", 200, []byte(response), ctx)
+			if e != nil || !strings.Contains(string(out), tc.want) {
+				t.Fatalf("out=%s err=%v", out, e)
+			}
+		})
+	}
+}
+
+func TestExecutorResponsesCustomUnsupportedDoesNotCallUpstream(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"tools":[{"type":"custom","name":"x","format":{"type":"grammar"}}]}`),
+		[]byte(`{"tools":[{"type":"namespace","name":"n","tools":[{"type":"namespace","name":"nested"}]}]}`),
+		[]byte(`{"tools":[{"type":"function","name":"n__x"},{"type":"namespace","name":"n","tools":[{"type":"function","name":"x"}]}]}`),
+		[]byte(`{"tools":[{"type":"web_search","name":"web"}]}`),
+		[]byte(`{"store":true,"input":"secret-state"}`),
+	} {
+		m, f := newExecManager(t)
+		m.mu.Lock()
+		m.cfg.ResponsesCompatibility = "strict"
+		m.mu.Unlock()
+		before := len(f.callsOf(pluginabi.MethodHostHTTPDo))
+		env := mustExecute(t, m, "glm-5.3", "openai-response", body)
+		if env.OK || env.Error == nil || env.Error.HTTPStatus != 400 {
+			t.Fatalf("env = %+v", env.Error)
+		}
+		if got := len(f.callsOf(pluginabi.MethodHostHTTPDo)); got != before {
+			t.Fatalf("upstream calls changed: %d -> %d", before, got)
+		}
+	}
+}
+
+func TestExecutorResponsesNamespaceGoldenNonStream(t *testing.T) {
+	request := []byte(`{"model":"x","text":{"format":{"type":"json_schema","name":"answer","strict":false,"schema":{"type":"object","properties":{"n":{"const":900719925474099312345}}}}},"tools":[{"type":"namespace","name":"fs","tools":[{"type":"custom","name":"patch"}]}],"tool_choice":{"type":"custom","namespace":"fs","name":"patch"},"input":[{"type":"additional_tools","tools":[{"type":"function","name":"sum","strict":true,"parameters":{"type":"object"}}]},{"type":"message","role":"user","content":"go"}]}`)
+	response := `{"id":"r","model":"qwen3.7-max","choices":[{"message":{"tool_calls":[{"id":"c","function":{"name":"fs__patch","arguments":"{\"input\":\"p\"}"}},{"id":"f","function":{"name":"sum","arguments":"{\"x\":1}"}}]},"finish_reason":"tool_calls"}]}`
+	f := &fakeCaller{}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	f.responder = wrapWithCatalog(multiRouteCatalog, upstreamRouter(t, map[string]string{"/v1/chat/completions": response}))
+	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML+testRouteOverrides)); err != nil {
+		t.Fatal(err)
+	}
+	env := mustExecute(t, m, "glm-5.3", "openai-response", request)
+	if !env.OK {
+		t.Fatalf("env=%+v", env.Error)
+	}
+	upstream := string(wireBody(t, lastWire(t, f, pluginabi.MethodHostHTTPDo), "body"))
+	for _, want := range []string{`"name":"fs__patch"`, `"name":"sum"`, `"strict":true`, `"name":"answer"`, `900719925474099312345`} {
+		if !strings.Contains(upstream, want) {
+			t.Fatalf("missing %s in %s", want, upstream)
+		}
+	}
+	var result pluginapi.ExecutorResponse
+	_ = json.Unmarshal(env.Result, &result)
+	downstream := string(result.Payload)
+	for _, want := range []string{`"type":"custom_tool_call"`, `"name":"patch"`, `"namespace":"fs"`, `"call_id":"c"`, `"type":"function_call"`, `"name":"sum"`, `"call_id":"f"`} {
+		if !strings.Contains(downstream, want) {
+			t.Fatalf("missing %s in %s", want, downstream)
+		}
+	}
+}
+
+func TestExecutorNativeResponsesPreservesP1Fields(t *testing.T) {
+	m, f := newExecManager(t)
+	body := []byte(`{"model":"x","store":true,"background":true,"previous_response_id":"p","conversation":"c","include":["x"],"tools":[{"type":"web_search"}],"unknown":{"secret":1}}`)
+	env := mustExecute(t, m, "gpt-5.6-luna", "openai-response", body)
+	if !env.OK {
+		t.Fatalf("native response rejected: %+v", env.Error)
+	}
+	wire := string(wireBody(t, lastWire(t, f, pluginabi.MethodHostHTTPDo), "body"))
+	for _, want := range []string{`"store":true`, `"background":true`, `"previous_response_id":"p"`, `"type":"web_search"`, `"secret":1`} {
+		if !strings.Contains(wire, want) {
+			t.Fatalf("native field lost %s: %s", want, wire)
+		}
+	}
+}
+
+func TestExecutorResponsesCustomToolStreamRoundTrip(t *testing.T) {
+	request := []byte(`{"model":"x","stream":true,"tools":[{"type":"custom","name":"apply_patch"}],"input":"fix"}`)
+	frames := []string{
+		"data: {\"id\":\"r\",\"model\":\"glm-5.3\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"apply_\",\"arguments\":\"{\\\"in\"}}]},\"finish_reason\":\"\"}]}\n\n",
+		"data: {\"id\":\"r\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"patch\",\"arguments\":\"put\\\":\\\"*** Begin Patch\\\\n+x\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+		"data: [DONE]\n\n",
+	}
+	m, f := newStreamManager(t, streamScript{upstreamID: "up-custom", frames: frames})
+	resp, err := m.HandleCall("executor.execute_stream", execStreamReqBody("glm-5.3", "openai-response", request, "down-custom"))
+	if err != nil || !decodeEnv(t, resp).OK {
+		t.Fatalf("stream start: %s %v", resp, err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for len(f.callsOf(pluginabi.MethodHostStreamClose)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	joined := strings.Join(emittedEvents(t, f), "")
+	for _, want := range []string{"response.output_item.added", "response.custom_tool_call_input.done", "response.output_item.done", "response.completed", `"type":"custom_tool_call"`, `"call_id":"c1"`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %s in %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, `response.function_call_arguments.delta`) {
+		t.Fatalf("custom JSON fragments leaked: %s", joined)
+	}
+
+	// Second turn replays the native call/output. Request translation must pair
+	// the result with c1 and upstream text must return as a normal completed response.
+	second := []byte(`{"model":"x","tools":[{"type":"custom","name":"apply_patch"}],"input":[{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"*** Begin Patch\n+x"},{"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"Done"}]}]}`)
+	f2 := &fakeCaller{}
+	m2 := NewManager(NewHostBridge(f2.call))
+	t.Cleanup(func() { _, _ = m2.HandleCall("plugin.shutdown", nil) })
+	f2.responder = wrapWithCatalog(multiRouteCatalog, upstreamRouter(t, map[string]string{"/v1/chat/completions": ccResponseBody}))
+	if _, err := m2.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML+testRouteOverrides)); err != nil {
+		t.Fatal(err)
+	}
+	env := mustExecute(t, m2, "glm-5.3", "openai-response", second)
+	if !env.OK {
+		t.Fatalf("second turn = %+v", env.Error)
+	}
+	wire := wireBody(t, lastWire(t, f2, pluginabi.MethodHostHTTPDo), "body")
+	if !strings.Contains(string(wire), `"tool_call_id":"c1"`) || !strings.Contains(string(wire), `"content":"Done"`) {
+		t.Fatalf("second turn pairing lost: %s", wire)
+	}
+	var result pluginapi.ExecutorResponse
+	_ = json.Unmarshal(env.Result, &result)
+	if !strings.Contains(string(result.Payload), `"status":"completed"`) || !strings.Contains(string(result.Payload), `"text":"hello"`) {
+		t.Fatalf("second response = %s", result.Payload)
+	}
+}
+
+func TestExecutorEOFIncompleteToolClosesWithRedactedError(t *testing.T) {
+	secret := "secret-fragment-value"
+	frame := `data: {"id":"r","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":"{\"x\":\"` + secret + `"}}]}}]}` + "\n\n"
+	m, f := newStreamManager(t, streamScript{upstreamID: "up-incomplete", frames: []string{frame}})
+	resp, err := m.HandleCall("executor.execute_stream", execStreamReqBody("glm-5.3", "openai-response", []byte(`{"input":"x","stream":true}`), "down-incomplete"))
+	if err != nil || !decodeEnv(t, resp).OK {
+		t.Fatalf("start=%s %v", resp, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(f.callsOf(pluginabi.MethodHostStreamClose)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	joined := strings.Join(emittedEvents(t, f), "")
+	if strings.Contains(joined, "response.completed") {
+		t.Fatalf("false completed: %s", joined)
+	}
+	closes := f.callsOf(pluginabi.MethodHostStreamClose)
+	if len(closes) == 0 {
+		t.Fatal("no downstream close")
+	}
+	payload := string(closes[len(closes)-1].payload)
+	if !strings.Contains(payload, "tool call was incomplete") || strings.Contains(payload, secret) {
+		t.Fatalf("close=%s", payload)
+	}
+}
+
 func TestExecuteStreamRoutedFromBothMethods(t *testing.T) {
 	t.Run("from execute with stream flag", func(t *testing.T) {
 		m, f := newStreamManager(t, streamScript{startStatus: http.StatusTooManyRequests})
@@ -1266,6 +1461,7 @@ func TestRegistrationCapabilitiesIncludeExecutor(t *testing.T) {
 	decodeResult(t, resp, &reg)
 	want := []string{"openai", "claude", "openai-response"}
 	if !reg.Capabilities.Executor || !reg.Capabilities.AuthProvider ||
+		reg.Capabilities.ExecutorModelScope != pluginapi.ExecutorModelScopeOAuth ||
 		!reflectDeepEqualStrings(reg.Capabilities.ExecutorInputFormats, want) ||
 		!reflectDeepEqualStrings(reg.Capabilities.ExecutorOutputFormats, want) {
 		t.Fatalf("capabilities = %+v", reg.Capabilities)

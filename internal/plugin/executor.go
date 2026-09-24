@@ -97,7 +97,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 	debugTrace("executor session mode=%s source_format=%s x_commandcode_session=%s fallback=%t", "non-stream", req.SourceFormat, sessionID, sessionID == emptyCommandCodeSessionID)
-	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, res.rec.Thinking)
+	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, res.rec.Thinking, res.cfg.ResponsesCompatibility)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
@@ -125,17 +125,17 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	if int64(len(resp.Body)) > res.cfg.MaxResponseBytes {
 		return classEnvelope(errclass.Translation("response exceeds max-response-bytes")), nil
 	}
-	converted, eErr := convertNonStream(res.rec.Protocol, req.SourceFormat, resp.StatusCode, resp.Body)
+	converted, eErr := convertNonStream(res.rec.Protocol, req.SourceFormat, resp.StatusCode, resp.Body, responsesRequestContext(req))
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
 	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: resp.Headers}), nil
 }
 
-func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
+func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport, responsesCompatibility ...string) ([]byte, *errclass.Error) {
 	switch route {
 	case catalog.RouteChatCompletions:
-		return chatcompletions.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts)
+		return chatcompletions.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, responsesCompatibility...)
 	case catalog.RouteMessages:
 		return messages.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts)
 	case catalog.RouteResponses:
@@ -290,10 +290,10 @@ func deriveCommandCodeSessionID(sourceFormat string, originalRequest []byte) (st
 // translator: every adapter owns status classification (>=400 → §7
 // classified errors), native passthrough, and cross-format conversion for
 // all client formats.
-func convertNonStream(route catalog.Route, sourceFormat string, status int, body []byte) ([]byte, *errclass.Error) {
+func convertNonStream(route catalog.Route, sourceFormat string, status int, body []byte, originalRequest ...[]byte) ([]byte, *errclass.Error) {
 	switch route {
 	case catalog.RouteChatCompletions:
-		return chatcompletions.ConvertNonStreamResponse(sourceFormat, status, body)
+		return chatcompletions.ConvertNonStreamResponse(sourceFormat, status, body, originalRequest...)
 	case catalog.RouteMessages:
 		return messages.ConvertNonStreamResponse(sourceFormat, status, body)
 	case catalog.RouteResponses:
@@ -323,14 +323,40 @@ var (
 	_ interface{ Flush() [][]byte } = (*messages.StreamConverter)(nil)
 )
 
-func newStreamConverter(route catalog.Route, sourceFormat string) streamConverter {
+func newStreamConverter(route catalog.Route, sourceFormat string, originalRequest ...[]byte) streamConverter {
 	switch route {
 	case catalog.RouteMessages:
 		return messages.NewStreamConverter(sourceFormat)
 	case catalog.RouteResponses:
 		return responses.NewStreamConverter(sourceFormat)
 	}
-	return chatcompletions.NewStreamConverter(sourceFormat)
+	return chatcompletions.NewStreamConverter(sourceFormat, originalRequest...)
+}
+
+// responsesRequestContext returns only an authentic inbound Responses request
+// for request-local custom-tool provenance. OriginalRequest wins when it is
+// valid JSON; Payload is a compatibility fallback only for Responses callers
+// and only when it is itself a valid JSON object. The translated upstream body
+// is never considered because its function schema has already erased custom
+// tool identity.
+func responsesRequestContext(req executorRequest) []byte {
+	if req.SourceFormat != "openai-response" {
+		return nil
+	}
+	validObject := func(raw []byte) bool {
+		if !json.Valid(raw) {
+			return false
+		}
+		var object map[string]json.RawMessage
+		return json.Unmarshal(raw, &object) == nil && object != nil
+	}
+	if validObject(req.OriginalRequest) {
+		return req.OriginalRequest
+	}
+	if validObject(req.Payload) {
+		return req.Payload
+	}
+	return nil
 }
 
 // handleExecuteStream implements executor.execute_stream (FR-006, §7).
@@ -361,7 +387,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 	debugTrace("executor session mode=%s source_format=%s x_commandcode_session=%s fallback=%t", "stream", req.SourceFormat, sessionID, sessionID == emptyCommandCodeSessionID)
-	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, res.rec.Thinking)
+	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, res.rec.Thinking, res.cfg.ResponsesCompatibility)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
@@ -404,12 +430,12 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		if m.bridge != nil {
 			defer m.bridge.inFlight.Done()
 		}
-		m.pumpStream(downID, id, res, req.SourceFormat)
+		m.pumpStream(downID, id, res, req.SourceFormat, responsesRequestContext(req))
 	}()
 	return okEnvelope(struct{}{}), nil
 }
 
-func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string) {
+func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string, originalRequest ...[]byte) {
 	var closeOnce sync.Once
 	closeStreams := func(downErrMsg string) {
 		closeOnce.Do(func() {
@@ -431,7 +457,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	})
 	defer watchdog.Stop()
 
-	conv := newStreamConverter(res.rec.Protocol, sourceFormat)
+	conv := newStreamConverter(res.rec.Protocol, sourceFormat, originalRequest...)
 	var (
 		total          int64
 		upstreamClosed bool
@@ -474,7 +500,19 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	}
 	debugTrace("executor stream loop end convDone=%t upstreamClosed=%t", convDone, upstreamClosed)
 	if !convDone && upstreamClosed {
-		if flusher, ok := conv.(interface{ Flush() [][]byte }); ok {
+		if flusher, ok := conv.(interface {
+			FlushWithError() ([][]byte, *errclass.Error)
+		}); ok {
+			flushed, flushErr := flusher.FlushWithError()
+			if flushErr != nil {
+				closeStreams(errclass.Redact(flushErr.Message))
+				return
+			}
+			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
+				closeStreams(errclass.Redact(emitErr.Error()))
+				return
+			}
+		} else if flusher, ok := conv.(interface{ Flush() [][]byte }); ok {
 			flushed := flusher.Flush()
 			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
 				closeStreams(errclass.Redact(emitErr.Error()))

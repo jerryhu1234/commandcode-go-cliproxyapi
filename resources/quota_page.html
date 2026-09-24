@@ -70,6 +70,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
 .quota-error { color: var(--error-color); }
 .quota-warning { color: var(--warning-color); }
 .quota-muted { color: var(--text-secondary); }
+.quota-error + .quota-help { margin-top: 6px; color: var(--text-secondary); }
 @media (max-width: 768px) {
   body { padding: 20px 16px; }
   .quota-grid { grid-template-columns: 1fr; }
@@ -114,6 +115,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   const fetchedAt = new Map();
   const errors = new Map();
   const inFlight = new Set();
+  let pageAuthKey = "";
   let cache = {};
   try {
     const stored = sessionStorage.getItem(storageKey);
@@ -160,30 +162,56 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
       render(cards);
     });
   }
-  function auth() {
+  function authStatus() {
+    const missing = status => ({key: "", status});
+    let raw;
     try {
-      const raw = localStorage.getItem("cli-proxy-auth");
-      if (!raw) return "";
+      try { raw = localStorage.getItem("cli-proxy-auth"); }
+      catch (_) { return missing("storage-blocked"); }
+      if (raw == null || raw === "") return missing("missing");
       let decoded = raw;
       if (raw.startsWith("enc::v1::") || raw.startsWith("enc::v2::")) {
-        const bytes = Uint8Array.from(atob(raw.slice(9)), char => char.charCodeAt(0));
+        const encoded = raw.slice(9);
+        if (!encoded || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 === 1) return missing("decode-invalid");
+        const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
         const seedText = raw.startsWith("enc::v2::") ? "cli-proxy-api-webui::secure-storage|v2|" + location.host : "cli-proxy-api-webui::secure-storage|" + location.host + "|" + navigator.userAgent;
         const seed = new TextEncoder().encode(seedText);
         for (let i = 0; i < bytes.length; i++) bytes[i] ^= seed[i % seed.length];
-        decoded = new TextDecoder().decode(bytes);
+        decoded = new TextDecoder("utf-8", {fatal: true}).decode(bytes);
+      } else if (raw.startsWith("enc::")) {
+        return missing("unsupported-format");
       }
       const parsed = JSON.parse(decoded);
-      if (parsed && parsed.state && parsed.state.managementKey) return typeof parsed.state.managementKey === "string" ? parsed.state.managementKey : "";
-      return "";
-    } catch (_) { return ""; }
+      if (parsed && parsed.state && typeof parsed.state.managementKey === "string" && parsed.state.managementKey) return {key: parsed.state.managementKey, status: "ok"};
+      return missing("key-missing");
+    } catch (_) { return missing("decode-invalid"); }
+  }
+  function auth() {
+    const result = authStatus();
+    if (result.key) pageAuthKey = result.key;
+    return result.key;
+  }
+  function authMessage(status) {
+    const messages = {
+      "storage-blocked": "Management Center credentials are unavailable here. Your browser may be blocking storage in this embedded page.",
+      missing: "Management Center credentials were not found. Confirm Remember password is enabled in Management Center, and open this page with Manager and CPA on the same origin (scheme, hostname, and port), then try again.",
+      "unsupported-format": "Management Center credentials use a newer storage format. Reload the Management Center and try again.",
+      "decode-invalid": "Management Center credentials could not be decoded. Reload the Management Center and try again.",
+      "key-missing": "Management Center storage is present, but it does not contain a management key. Sign in again and try again."
+    };
+    return messages[status] || "Management Center credentials could not be read. Try again.";
   }
   function request(body) {
     const headers = {"Content-Type": "application/json"};
-    const key = auth();
-    if (key) headers.Authorization = "Bearer " + key;
+    if (!pageAuthKey) return Promise.reject(new Error(authMessage("missing")));
+    headers.Authorization = "Bearer " + pageAuthKey;
     return fetch(endpoint, {method: "POST", headers, body: JSON.stringify(body)}).then(async response => {
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || "Request failed");
+      if (!response.ok) {
+        if (response.status === 401) throw new Error("Management API rejected these credentials (401). Sign in again in Management Center, then retry.");
+        if (response.status === 403) throw new Error("Management API denied access (403). Check your Management Center permissions.");
+        throw new Error(response.status >= 500 ? "Management API is temporarily unavailable. Try again." : "Management API request failed. Try again.");
+      }
       return data;
     });
   }
@@ -247,7 +275,21 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
     });
     app.appendChild(grid);
   }
-  if (!auth()) { app.textContent = ""; const p = document.createElement("p"); p.className = "quota-error"; p.setAttribute("role", "status"); p.textContent = "Enable Remember password in Management Center to use this page."; app.appendChild(p); return; }
+  function showMessage(message, help) {
+    app.textContent = "";
+    const p = document.createElement("p"); p.className = "quota-error"; p.setAttribute("role", "status"); p.textContent = message; app.appendChild(p);
+    if (help) { const h = document.createElement("p"); h.className = "quota-help"; h.textContent = help; app.appendChild(h); }
+  }
+  let initialAuth = authStatus();
+  if (initialAuth.key) {
+    pageAuthKey = initialAuth.key;
+  } else {
+    // A sandboxed/cross-origin iframe can briefly deny storage. One fresh read is
+    // useful, but do not retry the management request or start another list.
+    const retryAuth = initialAuth.status === "storage-blocked" ? authStatus() : initialAuth;
+    if (!retryAuth.key) { showMessage(authMessage(retryAuth.status), "Open this page from the Management Center after signing in. Credentials are never entered or stored here."); return; }
+    pageAuthKey = retryAuth.key;
+  }
   request({}).then(result => {
     const cards = result.cards || [];
     const configured = new Set(cards.map(card => card.key_id));

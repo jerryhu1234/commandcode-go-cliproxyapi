@@ -721,7 +721,7 @@ func TestBuildRequestResponsesErrors(t *testing.T) {
 		})
 	}
 	// A non-function tool type is unsupported_protocol_or_parameter (FR-009).
-	_, eErr := BuildRequest("m", "openai-response", []byte(`{"tools":[{"type":"web_search"}]}`), nil)
+	_, eErr := BuildRequest("m", "openai-response", []byte(`{"tools":[{"type":"web_search"}]}`), nil, "strict")
 	if eErr == nil || eErr.Class != errclass.ClassUnsupported {
 		t.Fatalf("unsupported tool type: want ClassUnsupported, got %+v", eErr)
 	}
@@ -881,7 +881,11 @@ func TestMalformedToolChoiceRejected(t *testing.T) {
 		if format == "openai-response" {
 			body = `{"tool_choice":42,"input":"hi"}`
 		}
-		_, eErr := BuildRequest("m", format, []byte(body), nil)
+		compat := []string(nil)
+		if format == "openai-response" {
+			compat = []string{"strict"}
+		}
+		_, eErr := BuildRequest("m", format, []byte(body), nil, compat...)
 		if eErr == nil || !strings.Contains(eErr.Message, "malformed tool_choice") {
 			t.Fatalf("%s: err = %+v", format, eErr)
 		}

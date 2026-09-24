@@ -414,7 +414,8 @@ func TestQuotaUnknownKeyAndResource(t *testing.T) {
 }
 
 func TestQuotaPageReadsRememberedManagementKey(t *testing.T) {
-	if !strings.Contains(resources.QuotaPage, "parsed.state && parsed.state.managementKey") {
+	if !strings.Contains(resources.QuotaPage, "parsed.state && typeof parsed.state.managementKey === \"string\"") ||
+		!strings.Contains(resources.QuotaPage, "return {key: parsed.state.managementKey, status: \"ok\"}") {
 		t.Fatal("quota page does not read persisted state.managementKey")
 	}
 }

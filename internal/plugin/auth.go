@@ -37,12 +37,22 @@ func (authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest)
 	if strings.TrimSpace(raw.APIKey) == "" {
 		return pluginapi.AuthParseResponse{}, fmt.Errorf("commandcode auth record has no api key")
 	}
-	if raw.ID == "" {
+	// File-backed auth identity belongs to the host: leaving ID empty lets CPA
+	// canonicalize req.Path relative to auth-dir (including the .json suffix).
+	// host.auth.save uses that same path-derived ID. Supplying the JSON id here
+	// would make the initial save and the watcher re-parse look like two auths.
+	// Non-file callers have no path to canonicalize, so retain the historical
+	// JSON id / FileName fallback for compatibility.
+	authID := raw.ID
+	if strings.TrimSpace(req.Path) != "" {
+		authID = ""
+	} else if authID == "" {
 		raw.ID = req.FileName
+		authID = raw.ID
 	}
-	debugTrace("auth parse handled provider=%s file=%s id=%s api_key_present=%t api_key_length=%d email_present=%t", req.Provider, req.FileName, raw.ID, strings.TrimSpace(raw.APIKey) != "", len(raw.APIKey), strings.TrimSpace(raw.Email) != "")
+	debugTrace("auth parse handled provider=%s file=%s id=%s api_key_present=%t api_key_length=%d email_present=%t", req.Provider, req.FileName, authID, strings.TrimSpace(raw.APIKey) != "", len(raw.APIKey), strings.TrimSpace(raw.Email) != "")
 	auth := pluginapi.AuthData{
-		Provider: ProviderID, ID: raw.ID, FileName: req.FileName, Label: raw.Label, StorageJSON: req.RawJSON,
+		Provider: ProviderID, ID: authID, FileName: req.FileName, Label: raw.Label, StorageJSON: req.RawJSON,
 		Attributes: map[string]string{"api_key": raw.APIKey},
 	}
 	// The host derives a credential's email from Metadata["email"], and the

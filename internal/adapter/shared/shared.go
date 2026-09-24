@@ -202,48 +202,72 @@ var AllToolChoiceKinds = []string{
 // shapes into a normalized kind plus forced-tool name. Unknown types are
 // a translation failure — tool_choice is never silently dropped (FR-005).
 func DecodeToolChoice(raw json.RawMessage) (kind, name string, eErr *errclass.Error) {
+	kind, name, namespace, eErr := DecodeToolChoiceIdentity(raw)
+	if eErr == nil && namespace != "" && name != "" {
+		name = namespace + "__" + name
+	}
+	return kind, name, eErr
+}
+
+// DecodeToolChoiceIdentity is the namespace-aware sibling of DecodeToolChoice.
+// Existing consumers keep receiving a deterministic namespace-qualified name;
+// newer consumers can retain the split Responses identity.
+func DecodeToolChoiceIdentity(raw json.RawMessage) (kind, name, namespace string, eErr *errclass.Error) {
 	if !HasContent(raw) {
-		return ToolChoiceAbsent, "", nil
+		return ToolChoiceAbsent, "", "", nil
 	}
 	var tc struct {
-		Type     string `json:"type"`
-		Name     string `json:"name"`
-		Function struct {
-			Name string `json:"name"`
+		Type      string `json:"type"`
+		Name      string `json:"name"`
+		Namespace string `json:"namespace"`
+		Function  struct {
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
 		} `json:"function"`
+		Custom struct {
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"custom"`
 	}
 	if err := json.Unmarshal(raw, &tc); err != nil {
 		if s := strings.TrimSpace(string(raw)); s == `"auto"` || s == `"any"` ||
 			s == `"required"` || s == `"none"` {
 			switch strings.Trim(s, `"`) {
 			case "auto":
-				return ToolChoiceAuto, "", nil
+				return ToolChoiceAuto, "", "", nil
 			case "any", "required":
-				return ToolChoiceAny, "", nil
+				return ToolChoiceAny, "", "", nil
 			default:
-				return ToolChoiceNone, "", nil
+				return ToolChoiceNone, "", "", nil
 			}
 		}
-		return "", "", errclass.Translation("malformed tool_choice: " + err.Error())
+		return "", "", "", errclass.Translation("malformed tool_choice: " + err.Error())
 	}
 	name = tc.Function.Name
+	namespace = tc.Function.Namespace
+	if name == "" {
+		name, namespace = tc.Custom.Name, tc.Custom.Namespace
+	}
 	if name == "" {
 		name = tc.Name
 	}
+	if namespace == "" {
+		namespace = tc.Namespace
+	}
 	switch tc.Type {
 	case "auto":
-		return ToolChoiceAuto, "", nil
+		return ToolChoiceAuto, "", "", nil
 	case "any", "required":
-		return ToolChoiceAny, "", nil
+		return ToolChoiceAny, "", "", nil
 	case "none":
-		return ToolChoiceNone, "", nil
-	case "tool", "function":
+		return ToolChoiceNone, "", "", nil
+	case "tool", "function", "custom":
 		if name == "" {
-			return "", "", errclass.Translation("malformed tool_choice: named tool requires a name")
+			return "", "", "", errclass.Translation("malformed tool_choice: named tool requires a name")
 		}
-		return ToolChoiceNamed, name, nil
+		return ToolChoiceNamed, name, namespace, nil
 	}
-	return "", "", errclass.Translation(fmt.Sprintf("unsupported tool_choice type %q", tc.Type))
+	return "", "", "", errclass.Translation(fmt.Sprintf("unsupported tool_choice type %q", tc.Type))
 }
 
 // DecodeArgs parses tool-call arguments JSON; empty arguments decode to an
@@ -841,43 +865,89 @@ func (e ClaudeEventEmitter) ThinkingDelta(index int, text string) []byte {
 // completed payload always carries the model, matching the non-stream
 // ResponsesResult shape.
 type ResponsesEventEmitter struct {
-	ID    string // response identity carried by every event
-	Model string // model rendered on the terminal completed payload
+	ID       string // response identity carried by every event
+	Model    string // model rendered on the terminal completed payload
+	Sequence *int64 // optional per-stream monotonically increasing sequence
+}
+
+func (e ResponsesEventEmitter) event(name string, payload map[string]any) []byte {
+	if e.Sequence != nil {
+		*e.Sequence++
+		payload["sequence_number"] = *e.Sequence
+	}
+	return SSEEvent(name, payload)
 }
 
 // Created renders the leading response.created announcement.
 func (e ResponsesEventEmitter) Created() []byte {
-	return SSEEvent("response.created", map[string]any{
+	return e.event("response.created", map[string]any{
 		"type": "response.created",
 		"response": map[string]any{
 			"id": e.ID, "object": "response", "created_at": time.Now().Unix(), "status": "in_progress",
+			"background": false, "error": nil, "output": []any{}, "model": e.Model,
 		},
 	})
+}
+
+func (e ResponsesEventEmitter) InProgress() []byte {
+	return e.event("response.in_progress", map[string]any{"type": "response.in_progress", "response": map[string]any{
+		"id": e.ID, "object": "response", "created_at": time.Now().Unix(), "status": "in_progress", "output": []any{}, "model": e.Model,
+	}})
 }
 
 // ItemAdded announces one output item before its first delta; item carries
 // the block-type-specific fields (message id/role/content, or function_call
 // call_id/name/arguments per the canonical call_id-only shape).
 func (e ResponsesEventEmitter) ItemAdded(outputIndex int, item map[string]any) []byte {
-	return SSEEvent("response.output_item.added", map[string]any{
+	return e.event("response.output_item.added", map[string]any{
 		"type": "response.output_item.added", "output_index": outputIndex, "item": item,
 	})
+}
+
+func (e ResponsesEventEmitter) TextPartAdded(itemID string, outputIndex int) []byte {
+	return e.event("response.content_part.added", map[string]any{"type": "response.content_part.added", "item_id": itemID, "output_index": outputIndex, "content_index": 0,
+		"part": map[string]any{"type": "output_text", "annotations": []any{}, "logprobs": []any{}, "text": ""}})
 }
 
 // TextDelta streams one partial output_text delta referencing the
 // announced message item by item_id and output_index.
 func (e ResponsesEventEmitter) TextDelta(itemID string, outputIndex int, delta string) []byte {
-	return SSEEvent("response.output_text.delta", map[string]any{
-		"type": "response.output_text.delta", "item_id": itemID, "output_index": outputIndex, "delta": delta,
+	return e.event("response.output_text.delta", map[string]any{
+		"type": "response.output_text.delta", "item_id": itemID, "output_index": outputIndex, "content_index": 0, "delta": delta, "logprobs": []any{},
 	})
+}
+
+func (e ResponsesEventEmitter) TextDone(itemID string, outputIndex int, text string, status string) [][]byte {
+	part := map[string]any{"type": "output_text", "annotations": []any{}, "logprobs": []any{}, "text": text}
+	item := map[string]any{"id": itemID, "type": "message", "status": status, "role": "assistant", "content": []any{part}}
+	return [][]byte{
+		e.event("response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": itemID, "output_index": outputIndex, "content_index": 0, "text": text, "logprobs": []any{}}),
+		e.event("response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": itemID, "output_index": outputIndex, "content_index": 0, "part": part}),
+		e.ItemDone(outputIndex, item),
+	}
+}
+
+func (e ResponsesEventEmitter) ItemDone(outputIndex int, item any) []byte {
+	return e.event("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": outputIndex, "item": item})
+}
+
+func (e ResponsesEventEmitter) CustomInputDone(itemID string, outputIndex int, input string) []byte {
+	return e.event("response.custom_tool_call_input.done", map[string]any{"type": "response.custom_tool_call_input.done", "item_id": itemID, "output_index": outputIndex, "input": input})
 }
 
 // ArgsDelta streams one partial function_call_arguments delta referencing
 // the announced function_call item by item_id and output_index.
 func (e ResponsesEventEmitter) ArgsDelta(itemID string, outputIndex int, delta string) []byte {
-	return SSEEvent("response.function_call_arguments.delta", map[string]any{
+	return e.event("response.function_call_arguments.delta", map[string]any{
 		"type": "response.function_call_arguments.delta", "item_id": itemID, "output_index": outputIndex, "delta": delta,
 	})
+}
+
+func (e ResponsesEventEmitter) ArgsDone(itemID string, outputIndex int, arguments string, item any) [][]byte {
+	return [][]byte{
+		e.event("response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "item_id": itemID, "output_index": outputIndex, "arguments": arguments}),
+		e.ItemDone(outputIndex, item),
+	}
 }
 
 // ReasoningItemAdded announces the reasoning item before any of its summary
@@ -889,7 +959,7 @@ func (e ResponsesEventEmitter) ReasoningItemAdded(itemID string, outputIndex int
 
 // ReasoningPartAdded opens the item's single summary part.
 func (e ResponsesEventEmitter) ReasoningPartAdded(itemID string, outputIndex int) []byte {
-	return SSEEvent("response.reasoning_summary_part.added", map[string]any{
+	return e.event("response.reasoning_summary_part.added", map[string]any{
 		"type":    "response.reasoning_summary_part.added",
 		"item_id": itemID, "output_index": outputIndex, "summary_index": 0,
 		"part": RespReasoningPart{Type: "summary_text"},
@@ -898,7 +968,7 @@ func (e ResponsesEventEmitter) ReasoningPartAdded(itemID string, outputIndex int
 
 // ReasoningSummaryDelta streams one partial reasoning summary fragment.
 func (e ResponsesEventEmitter) ReasoningSummaryDelta(itemID string, outputIndex int, delta string) []byte {
-	return SSEEvent("response.reasoning_summary_text.delta", map[string]any{
+	return e.event("response.reasoning_summary_text.delta", map[string]any{
 		"type":    "response.reasoning_summary_text.delta",
 		"item_id": itemID, "output_index": outputIndex, "summary_index": 0, "delta": delta,
 	})
@@ -909,7 +979,7 @@ func (e ResponsesEventEmitter) ReasoningSummaryDelta(itemID string, outputIndex 
 // with the aggregated text — the three terminal transitions of one thinking
 // run, emitted together when text, tool calls, or the stream end arrive.
 func (e ResponsesEventEmitter) ReasoningSummaryDone(itemID string, outputIndex int, text string) []byte {
-	return SSEEvent("response.reasoning_summary_text.done", map[string]any{
+	return e.event("response.reasoning_summary_text.done", map[string]any{
 		"type":    "response.reasoning_summary_text.done",
 		"item_id": itemID, "output_index": outputIndex, "summary_index": 0, "text": text,
 	})
@@ -917,7 +987,7 @@ func (e ResponsesEventEmitter) ReasoningSummaryDone(itemID string, outputIndex i
 
 // ReasoningPartDone closes the summary part with its aggregated text.
 func (e ResponsesEventEmitter) ReasoningPartDone(itemID string, outputIndex int, text string) []byte {
-	return SSEEvent("response.reasoning_summary_part.done", map[string]any{
+	return e.event("response.reasoning_summary_part.done", map[string]any{
 		"type":    "response.reasoning_summary_part.done",
 		"item_id": itemID, "output_index": outputIndex, "summary_index": 0,
 		"part": RespReasoningPart{Type: "summary_text", Text: text},
@@ -928,7 +998,7 @@ func (e ResponsesEventEmitter) ReasoningPartDone(itemID string, outputIndex int,
 // terminal response.completed item (encrypted_content present, one
 // summary_text part).
 func (e ResponsesEventEmitter) ReasoningItemDone(itemID string, outputIndex int, text string) []byte {
-	return SSEEvent("response.output_item.done", map[string]any{
+	return e.event("response.output_item.done", map[string]any{
 		"type": "response.output_item.done", "output_index": outputIndex,
 		"item": NewRespReasoningItem(itemID, text),
 	})
@@ -938,11 +1008,11 @@ func (e ResponsesEventEmitter) ReasoningItemDone(itemID string, outputIndex int,
 // route's status mapping, usage always attached (F-R6), and output items
 // rendered by the caller through OutputAssembler.
 func (e ResponsesEventEmitter) Completed(status string, usage ResponsesUsage, output []any) []byte {
-	return SSEEvent("response.completed", map[string]any{
+	return e.event("response.completed", map[string]any{
 		"type": "response.completed",
 		"response": map[string]any{
 			"id": e.ID, "object": "response", "model": e.Model, "status": status,
-			"usage": usage, "output": output,
+			"background": false, "error": nil, "usage": usage, "output": output,
 		},
 	})
 }
@@ -1143,17 +1213,25 @@ type RespTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Format      json.RawMessage `json:"format,omitempty"`
+	Namespace   string          `json:"namespace,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
+	Tools       []RespTool      `json:"tools,omitempty"`
 }
 
 // ResponsesRequest decodes an inbound OpenAI Responses request body
 // (superset of what each adapter reads). Instructions is a JSON string,
 // Input a JSON string or item array.
 type ResponsesRequest struct {
-	Instructions      json.RawMessage `json:"instructions"`
-	Input             json.RawMessage `json:"input"`
-	MaxOutputTokens   *int64          `json:"max_output_tokens"`
-	Tools             []RespTool      `json:"tools"`
-	ToolChoice        json.RawMessage `json:"tool_choice"`
+	Instructions    json.RawMessage `json:"instructions"`
+	Input           json.RawMessage `json:"input"`
+	MaxOutputTokens *int64          `json:"max_output_tokens"`
+	Tools           []RespTool      `json:"tools"`
+	ToolChoice      json.RawMessage `json:"tool_choice"`
+	Text            *struct {
+		Format json.RawMessage `json:"format"`
+	} `json:"text,omitempty"`
+	StreamOptions     json.RawMessage `json:"stream_options,omitempty"`
 	ParallelToolCalls *bool           `json:"parallel_tool_calls"`
 	Stream            bool            `json:"stream"`
 	Temperature       *float64        `json:"temperature"`
@@ -1215,6 +1293,10 @@ type RespItem struct {
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
+	Input     string          `json:"input,omitempty"`
+	Namespace string          `json:"namespace,omitempty"`
+	Status    string          `json:"status,omitempty"`
+	Tools     []RespTool      `json:"tools,omitempty"`
 	// Output is a JSON string or an array of text parts. Kept raw so either
 	// shape decodes; FunctionCallOutputText flattens it for upstream.
 	Output  json.RawMessage `json:"output,omitempty"`
@@ -1223,12 +1305,229 @@ type RespItem struct {
 	} `json:"summary,omitempty"`
 }
 
+// ResponsesToolContext is immutable request-local provenance used to reverse
+// the function-shaped transport of Responses custom tools. It is deliberately
+// passed by the caller; no package-global name registry can leak classifications
+// between concurrent requests that happen to use the same tool name.
+type ResponsesToolContext struct {
+	kinds      map[string]string
+	byChatName map[string]ResponsesToolIdentity
+	byIdentity map[string]ResponsesToolIdentity
+	localCount map[string]int
+}
+
+// ResponsesToolIdentity is the lossless identity of one flat or one-level
+// namespaced Responses declaration and its deterministic Chat name.
+type ResponsesToolIdentity struct {
+	Kind      string
+	Name      string
+	Namespace string
+	ChatName  string
+}
+
+// NewResponsesToolContext records the winning flat tool declaration by name.
+// Namespace tools are rejected by the request translator because this adapter
+// cannot preserve their identity without lossy flattening.
+func NewResponsesToolContext(request []byte) ResponsesToolContext {
+	var req ResponsesRequest
+	_ = json.Unmarshal(request, &req)
+	c, _, _ := BuildResponsesToolContextCPA(&req, "Chat Completions")
+	return c
+}
+
+func emptyResponsesToolContext() ResponsesToolContext {
+	return ResponsesToolContext{
+		kinds: make(map[string]string), byChatName: make(map[string]ResponsesToolIdentity),
+		byIdentity: make(map[string]ResponsesToolIdentity), localCount: make(map[string]int),
+	}
+}
+
+// BuildResponsesToolContext validates and flattens Responses declarations for
+// a Chat Completions target. Top-level tools and additional_tools input items
+// share one first-seen deduplication pass; conflicting aliases are rejected.
+func BuildResponsesToolContext(req *ResponsesRequest, target string) (ResponsesToolContext, []CCTool, *errclass.Error) {
+	return buildResponsesToolContext(req, target, true)
+}
+
+// BuildResponsesToolContextCPA applies CPA v7.3.15's compatibility policy:
+// declarations unsupported by Chat Completions are skipped, and custom grammar
+// is downgraded to the same freeform {input:string} transport as text format.
+// Namespace identity/collision checks remain fail-closed.
+func BuildResponsesToolContextCPA(req *ResponsesRequest, target string) (ResponsesToolContext, []CCTool, *errclass.Error) {
+	return buildResponsesToolContext(req, target, false)
+}
+
+func buildResponsesToolContext(req *ResponsesRequest, target string, strict bool) (ResponsesToolContext, []CCTool, *errclass.Error) {
+	c := emptyResponsesToolContext()
+	if req == nil {
+		return c, nil, nil
+	}
+	declarations := append([]RespTool(nil), req.Tools...)
+	items, eErr := req.DecodeInputItems()
+	if eErr != nil {
+		return c, nil, eErr
+	}
+	for _, item := range items {
+		if item.Type == "additional_tools" {
+			declarations = append(declarations, item.Tools...)
+		}
+	}
+	var out []CCTool
+	seenSchema := make(map[string][]byte)
+	add := func(tool RespTool, namespace string) *errclass.Error {
+		kind := strings.TrimSpace(tool.Type)
+		if kind != "function" && kind != "custom" {
+			if !strict {
+				return nil
+			}
+			return unsupportedResponsesTool(fmt.Sprintf("unsupported Responses tool type %q for %s", kind, target))
+		}
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			return unsupportedResponsesTool("Responses tool name is required")
+		}
+		chatName := name
+		if namespace != "" {
+			chatName = namespace + "__" + name
+		}
+		if len(chatName) > 64 {
+			return unsupportedResponsesTool("Responses tool name exceeds the 64-byte Chat Completions limit")
+		}
+		id := ResponsesToolIdentity{Kind: kind, Name: name, Namespace: namespace, ChatName: chatName}
+		key := namespace + "\x00" + name
+		var schema json.RawMessage
+		if kind == "custom" {
+			if HasContent(tool.Format) {
+				var format struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(tool.Format, &format) != nil || (strict && format.Type != "text") {
+					return unsupportedResponsesTool("custom tool format is unsupported; only text format translates to Chat Completions")
+				}
+			}
+			schema = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`)
+		} else {
+			schema = ObjectSchema(tool.Parameters)
+		}
+		fn := CCFunction{Name: chatName, Description: tool.Description, Parameters: schema, Strict: tool.Strict}
+		encoded, _ := json.Marshal(fn)
+		if previous, ok := seenSchema[key]; ok {
+			if existing := c.byIdentity[key]; existing.Kind != kind || !bytes.Equal(previous, encoded) {
+				return unsupportedResponsesTool("conflicting duplicate Responses tool declaration")
+			}
+			return nil
+		}
+		if existing, ok := c.byChatName[chatName]; ok && (existing.Namespace != namespace || existing.Name != name) {
+			return unsupportedResponsesTool("Responses tool declarations collide after namespace flattening")
+		}
+		seenSchema[key] = encoded
+		c.byIdentity[key], c.byChatName[chatName], c.kinds[chatName] = id, id, kind
+		c.localCount[name]++
+		out = append(out, CCTool{Type: "function", Function: fn})
+		return nil
+	}
+	for _, tool := range declarations {
+		if tool.Type == "namespace" {
+			ns := strings.TrimSpace(tool.Name)
+			if ns == "" {
+				return c, nil, unsupportedResponsesTool("Responses namespace name is required")
+			}
+			for _, child := range tool.Tools {
+				if child.Type == "namespace" || len(child.Tools) > 0 {
+					return c, nil, unsupportedResponsesTool("nested Responses namespaces are unsupported")
+				}
+				if e := add(child, ns); e != nil {
+					return c, nil, e
+				}
+			}
+			continue
+		}
+		if len(tool.Tools) > 0 {
+			return c, nil, unsupportedResponsesTool("builtin or nested Responses tools are unsupported")
+		}
+		if e := add(tool, ""); e != nil {
+			return c, nil, e
+		}
+	}
+	return c, out, nil
+}
+
+func unsupportedResponsesTool(message string) *errclass.Error {
+	return &errclass.Error{Class: errclass.ClassUnsupported, StatusCode: 400, Message: message}
+}
+
+// ResolveCall maps a Responses identity to the emitted Chat identity. Bare
+// local names are rejected when more than one namespace declares them.
+func (c ResponsesToolContext) ResolveCall(namespace, name string) (ResponsesToolIdentity, *errclass.Error) {
+	if namespace == "" && c.localCount[name] > 1 {
+		return ResponsesToolIdentity{}, unsupportedResponsesTool("ambiguous bare Responses tool name")
+	}
+	if id, ok := c.byIdentity[namespace+"\x00"+name]; ok {
+		return id, nil
+	}
+	if namespace == "" && c.localCount[name] == 1 {
+		for _, id := range c.byIdentity {
+			if id.Name == name {
+				return id, nil
+			}
+		}
+	}
+	return ResponsesToolIdentity{}, unsupportedResponsesTool("Responses tool call does not match a declaration")
+}
+
+func (c ResponsesToolContext) ResolveChatName(name string) (ResponsesToolIdentity, bool) {
+	id, ok := c.byChatName[name]
+	return id, ok
+}
+
+func (c ResponsesToolContext) IsCustom(name string) bool { return c.kinds[name] == "custom" }
+
+// ClassifyStreamedName classifies an accumulated streamed function name from
+// request-local declarations. exact is authoritative (even when the exact name
+// is also a prefix of another declaration); wait means the name is a strict
+// prefix of at least one declaration and needs more chunks. A non-exact,
+// non-waiting name is unknown and callers conservatively treat it as function.
+func (c ResponsesToolContext) ClassifyStreamedName(name string) (kind string, exact, wait bool) {
+	if kind, exact = c.kinds[name]; exact {
+		return kind, true, false
+	}
+	for candidate := range c.kinds {
+		if strings.HasPrefix(candidate, name) && candidate != name {
+			return "", false, true
+		}
+	}
+	return "", false, false
+}
+
+// WrapCustomToolInput encodes freeform custom input into the object schema used
+// on the Chat Completions transport leg.
+func WrapCustomToolInput(input string) string {
+	b, _ := json.Marshal(struct {
+		Input string `json:"input"`
+	}{Input: input})
+	return string(b)
+}
+
+// UnwrapCustomToolInput strictly decodes the transport wrapper. A malformed,
+// missing, or non-string input is a safe translation error and never echoes the
+// argument payload.
+func UnwrapCustomToolInput(arguments string) (string, *errclass.Error) {
+	var wrapper struct {
+		Input *string `json:"input"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &wrapper); err != nil || wrapper.Input == nil {
+		return "", errclass.Translation("custom tool arguments must be an object with string input")
+	}
+	return *wrapper.Input, nil
+}
+
 // CCFunction is one Chat Completions tool function definition (decode and
 // emit; omitempty keeps absent descriptions/parameters off the wire).
 type CCFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 // CCToolCall is one Chat Completions tool call (decode and emit).
@@ -1269,6 +1568,8 @@ type ChatCompletionsRequest struct {
 	Temperature         *float64        `json:"temperature"`
 	TopP                *float64        `json:"top_p"`
 	ReasoningEffort     string          `json:"reasoning_effort"`
+	ResponseFormat      json.RawMessage `json:"response_format"`
+	StreamOptions       json.RawMessage `json:"stream_options"`
 }
 
 // JoinTexts concatenates the string values stored under "text" across
@@ -1675,8 +1976,10 @@ func SystemImageRejected() *errclass.Error {
 // outputTextPart is one content part of a synthesized assistant message
 // item.
 type outputTextPart struct {
-	Type string `json:"type"` // always "output_text"
-	Text string `json:"text"`
+	Type        string `json:"type"` // always "output_text"
+	Text        string `json:"text"`
+	Annotations []any  `json:"annotations,omitempty"`
+	Logprobs    []any  `json:"logprobs,omitempty"`
 }
 
 // OutputAssembler aggregates Responses output items — ONE assistant
@@ -1691,10 +1994,11 @@ type outputTextPart struct {
 // only when text is non-empty). Render materializes the array once, at
 // terminal time.
 type OutputAssembler struct {
-	messageID string          // identity carried by the message item
-	items     []any           // rendered items in insertion order
-	textSlot  int             // reserved message position, -1 until reserved
-	text      strings.Builder // aggregated message text
+	messageID     string          // identity carried by the message item
+	items         []any           // rendered items in insertion order
+	textSlot      int             // reserved message position, -1 until reserved
+	text          strings.Builder // aggregated message text
+	messageStatus string
 }
 
 // NewOutputAssembler binds an assembler to the response identity the
@@ -1702,6 +2006,11 @@ type OutputAssembler struct {
 func NewOutputAssembler(messageID string) *OutputAssembler {
 	return &OutputAssembler{messageID: messageID, textSlot: -1, items: make([]any, 0)}
 }
+
+// SetMessageID updates the assistant message identity without changing the
+// response identity or output placement.
+func (a *OutputAssembler) SetMessageID(messageID string)  { a.messageID = messageID }
+func (a *OutputAssembler) SetMessageStatus(status string) { a.messageStatus = status }
 
 // ReserveTextSlot pins the message item's position at the current end of
 // the output array so later function_call items cannot displace it;
@@ -1723,9 +2032,27 @@ func (a *OutputAssembler) AddText(fragment string) {
 // arguments pass through verbatim — callers apply the absent-arguments
 // policy themselves.
 func (a *OutputAssembler) AppendFunctionCall(callID, name, args string) {
+	a.AppendFunctionCallWithNamespace(callID, name, "", args)
+}
+
+// AppendFunctionCallWithNamespace adds one function_call while retaining the
+// declaration identity directly on the item. This avoids unsafe post-joins by
+// call_id, which may be empty or repeated in upstream output.
+func (a *OutputAssembler) AppendFunctionCallWithNamespace(callID, name, namespace, args string) {
 	a.items = append(a.items, RespItem{
-		Type: "function_call", CallID: callID, Name: name, Arguments: args,
+		Type: "function_call", CallID: callID, Name: name, Namespace: namespace, Arguments: args,
 	})
+}
+
+// AppendCustomToolCall adds one native Responses freeform call.
+func (a *OutputAssembler) AppendCustomToolCall(callID, name, input string) {
+	a.AppendCustomToolCallWithNamespace(callID, name, "", input)
+}
+
+// AppendCustomToolCallWithNamespace is the custom-tool sibling of
+// AppendFunctionCallWithNamespace.
+func (a *OutputAssembler) AppendCustomToolCallWithNamespace(callID, name, namespace, input string) {
+	a.items = append(a.items, RespItem{Type: "custom_tool_call", CallID: callID, Name: name, Namespace: namespace, Input: input, Status: "completed"})
 }
 
 // AppendReasoning adds one reasoning item in arrival order. Upstream
@@ -1741,8 +2068,8 @@ func (a *OutputAssembler) AppendReasoning(item RespReasoningItem) {
 func (a *OutputAssembler) Render() []any {
 	t := a.text.String()
 	if t != "" || a.textSlot >= 0 {
-		content, _ := json.Marshal([]outputTextPart{{Type: "output_text", Text: t}})
-		msg := RespItem{Type: "message", ID: a.messageID, Role: "assistant", Content: content}
+		content, _ := json.Marshal([]outputTextPart{{Type: "output_text", Text: t, Annotations: []any{}, Logprobs: []any{}}})
+		msg := RespItem{Type: "message", ID: a.messageID, Role: "assistant", Status: a.messageStatus, Content: content}
 		if a.textSlot >= 0 {
 			a.items[a.textSlot] = msg
 		} else {

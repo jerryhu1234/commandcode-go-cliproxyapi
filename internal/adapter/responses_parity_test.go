@@ -118,20 +118,23 @@ func TestResponsesSynthesisRouteParity(t *testing.T) {
 		return regexp.MustCompile(`"created_at":\d+`).ReplaceAllString(s, `"created_at":0`)
 	}
 	a, b := norm(fromClaude), norm(fromCC)
-	if a != b {
-		t.Fatalf("routes diverge:\nclaude-source: %s\ncc-source:     %s", a, b)
-	}
+	// Both routes preserve the same semantic response. Chat Completions emits
+	// the fuller CPA/OpenAI SDK lifecycle (part/done/sequence events), while the
+	// Messages sibling remains compact until its own compatibility migration.
 	for _, want := range []string{
 		`response.created`, `response.output_item.added`, `response.output_text.delta`,
 		`response.function_call_arguments.delta`, `"model":"m1"`, `"status":"completed"`,
 		`"total_tokens":5`,
 	} {
-		if !strings.Contains(a, want) {
-			t.Errorf("synthesized stream missing %s", want)
+		if !strings.Contains(a, want) || !strings.Contains(b, want) {
+			t.Errorf("synthesized stream missing %s: claude=%t chat=%t", want, strings.Contains(a, want), strings.Contains(b, want))
 		}
 	}
 	if strings.Count(a, "data: ") != 7 {
 		t.Errorf("event count = %d, want 7 (created, 2 added, text delta, 2 args deltas, completed)",
 			strings.Count(a, "data: "))
+	}
+	if strings.Count(b, "sequence_number") != strings.Count(b, "data: ") || !strings.Contains(b, "response.content_part.added") || !strings.Contains(b, "response.output_item.done") {
+		t.Errorf("chat lifecycle incomplete: %s", b)
 	}
 }

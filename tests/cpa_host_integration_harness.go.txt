@@ -1,0 +1,233 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+)
+
+const pluginID = "commandcode-go-cliproxyapi"
+const secret = "sk-cpa-host-fake-key"
+
+func require(ok bool, format string, args ...any) {
+	if !ok { panic(fmt.Sprintf(format, args...)) }
+}
+
+func waitFor(label string, condition func() bool) {
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() { return }
+		time.Sleep(25 * time.Millisecond)
+	}
+	panic("timed out waiting for " + label)
+}
+
+func attachWatcher(ctx context.Context, configPath, authDir string, cfg *config.Config, host *pluginhost.Host, manager *coreauth.Manager) *watcher.Watcher {
+	w, err := watcher.NewWatcher(configPath, authDir, nil)
+	require(err == nil, "create watcher: %v", err)
+	w.SetConfig(cfg)
+	w.SetPluginAuthParser(host)
+	updates := make(chan watcher.AuthUpdate, 32)
+	w.SetAuthUpdateQueue(updates)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done(): return
+			case update := <-updates:
+				switch update.Action {
+				case watcher.AuthUpdateActionAdd:
+					_, _ = manager.Register(context.Background(), update.Auth)
+				case watcher.AuthUpdateActionModify:
+					_, _ = manager.Update(context.Background(), update.Auth)
+				case watcher.AuthUpdateActionDelete:
+					manager.Remove(context.Background(), update.ID)
+				}
+			}
+		}
+	}()
+	require(w.Start(ctx) == nil, "start watcher")
+	return w
+}
+
+func commandCodeAuths(manager *coreauth.Manager) []*coreauth.Auth {
+	var out []*coreauth.Auth
+	for _, auth := range manager.List() { if auth.Provider == "commandcode" { out = append(out, auth) } }
+	return out
+}
+
+func requireUniqueRows(manager *coreauth.Manager) {
+	rows := map[string]bool{}
+	for _, auth := range manager.List() {
+		auth.EnsureIndex()
+		name := auth.FileName
+		if name == "" { name = auth.ID }
+		row := name + "\x00" + auth.Index
+		require(!rows[row], "duplicate Manager row key %q", row)
+		rows[row] = true
+	}
+}
+
+type executorManager struct { mu sync.Mutex; executors map[string]coreauth.ProviderExecutor }
+func (m *executorManager) Executor(provider string) (coreauth.ProviderExecutor, bool) { m.mu.Lock(); defer m.mu.Unlock(); e, ok := m.executors[provider]; return e, ok }
+func (m *executorManager) RegisterExecutor(e coreauth.ProviderExecutor) { m.mu.Lock(); defer m.mu.Unlock(); m.executors[e.Identifier()] = e }
+func (m *executorManager) UnregisterExecutor(provider string) { m.mu.Lock(); defer m.mu.Unlock(); delete(m.executors, provider) }
+
+func main() {
+	require(len(os.Args) == 3, "usage: harness PLUGIN_DIR AUTH_DIR")
+	pluginDir, authDir := os.Args[1], os.Args[2]
+	mux := http.NewServeMux()
+	mux.HandleFunc("/provider/v1/models", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"id":"glm-5.3"}]}`)
+	})
+	mux.HandleFunc("/provider/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		require(r.Header.Get("Authorization") == "Bearer "+secret, "executor credential mismatch")
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if stream, _ := body["stream"].(bool); stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl_host\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"host-stream\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"chatcmpl_host","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"host-nonstream"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	})
+	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, r *http.Request) {
+		require(r.Header.Get("Authorization") == "Bearer "+secret, "quota credential mismatch")
+		_, _ = io.WriteString(w, `{"credits":{"monthlyCredits":4,"purchasedCredits":1},"windowLimits":{"limited":true,"fiveHour":{"used":10,"cap":10,"exceeded":true},"weekly":{"used":2,"cap":8}}}`)
+	})
+	mux.HandleFunc("/alpha/billing/subscriptions", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"success":true,"data":{"planId":"individual-go"}}`)
+	})
+	mux.HandleFunc("/alpha/whoami", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"success":true,"user":{"email":"host-integration@example.test"}}`)
+	})
+	upstream := httptest.NewServer(mux)
+	defer upstream.Close()
+
+	configPath := filepath.Join(filepath.Dir(authDir), "config.yaml")
+	rawConfig := fmt.Sprintf(`auth-dir: %q
+plugins:
+  enabled: true
+  dir: %q
+  configs:
+    %s:
+      enabled: true
+      base-url: %s/provider/v1
+      allow-http: true
+      api-keys:
+        - value: %s
+`, authDir, pluginDir, pluginID, upstream.URL, secret)
+	cfg, err := config.ParseConfigBytes([]byte(rawConfig))
+	require(err == nil, "parse config: %v", err)
+	require(os.WriteFile(configPath, []byte(rawConfig), 0600) == nil, "write watcher config")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	authManager := coreauth.NewManager(nil, nil, nil)
+	codexPath := filepath.Join(authDir, "codex-fake.json")
+	require(os.WriteFile(codexPath, []byte(`{"type":"codex","access_token":"fake-codex-token","email":"codex@example.test"}`), 0600) == nil, "write codex fixture")
+	codex := &coreauth.Auth{ID: "codex-fake.json", Provider: "codex", FileName: "codex-fake.json", Attributes: map[string]string{"path": codexPath}}
+	_, err = authManager.Register(ctx, codex)
+	require(err == nil, "register codex fixture: %v", err)
+	host := pluginhost.New()
+	// The manager is connected before ApplyConfig invokes plugin lifecycle and
+	// host.auth.save. The real watcher is then attached to that same manager.
+	host.SetAuthManager(authManager)
+	host.ApplyConfig(context.Background(), cfg)
+	w := attachWatcher(ctx, configPath, authDir, cfg, host, authManager)
+	defer w.Stop()
+	require(host.PluginRegistered(pluginID), "plugin did not register through CPA host")
+	infos := host.RegisteredPlugins()
+	require(len(infos) == 1, "registered plugins: %+v", infos)
+	info := infos[0]
+	require(info.Metadata.Version == "0.2.0-dev.5" && info.SupportsOAuth && info.SupportsQuota && info.QuotaProvider == "commandcode", "metadata/capabilities: %+v", info)
+
+	files, _ := filepath.Glob(filepath.Join(authDir, "commandcode-key-*.json"))
+	require(len(files) == 1, "auth materialization files: %v", files)
+	authJSON, err := os.ReadFile(files[0])
+	require(err == nil && bytes.Contains(authJSON, []byte(secret)), "materialized auth missing fake key")
+	waitFor("canonical watcher auth", func() bool { a := commandCodeAuths(authManager); return len(a) == 1 && strings.HasSuffix(a[0].ID, ".json") && a[0].Attributes["api_key"] == secret })
+	waitFor("codex watcher auth", func() bool { _, ok := authManager.GetByID(codex.ID); return ok })
+	authManager.MarkResult(ctx, coreauth.Result{AuthID: codex.ID, Model: "codex/fake", Success: true})
+	codexBefore, _ := authManager.GetByID(codex.ID)
+	codexIndex := codexBefore.Index
+	codexBuckets := codexBefore.RecentRequestsSnapshot(time.Now())
+	auth := commandCodeAuths(authManager)[0]
+	auth.EnsureIndex()
+	canonicalID, canonicalIndex := auth.ID, auth.Index
+	require(canonicalID == filepath.Base(files[0]), "canonical ID = %q, want %q", canonicalID, filepath.Base(files[0]))
+	requireUniqueRows(authManager)
+	models := host.ModelsForAuth(context.Background(), auth)
+	require(models.Handled && models.Err == nil && len(models.Models) == 1 && strings.Contains(models.Models[0].ID, "glm-5.3"), "models: %+v", models)
+	mgr := &executorManager{executors: map[string]coreauth.ProviderExecutor{}}
+	host.RegisterExecutors(mgr, nil)
+	executor, ok := mgr.Executor("commandcode")
+	require(ok, "CPA did not register commandcode executor")
+	payload := []byte(`{"model":"commandcode/glm-5.3","messages":[{"role":"user","content":"hello"}]}`)
+	response, err := executor.Execute(context.Background(), auth, coreexecutor.Request{Model: "commandcode/glm-5.3", Payload: payload, Format: translator.FromString("openai")}, coreexecutor.Options{OriginalRequest: payload, SourceFormat: translator.FromString("openai"), ResponseFormat: translator.FromString("openai")})
+	require(err == nil && bytes.Contains(response.Payload, []byte("host-nonstream")), "nonstream executor: %s err=%v", response.Payload, err)
+	streamPayload := []byte(`{"model":"commandcode/glm-5.3","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	stream, err := executor.ExecuteStream(context.Background(), auth, coreexecutor.Request{Model: "commandcode/glm-5.3", Payload: streamPayload, Format: translator.FromString("openai")}, coreexecutor.Options{Stream: true, OriginalRequest: streamPayload, SourceFormat: translator.FromString("openai"), ResponseFormat: translator.FromString("openai")})
+	require(err == nil && stream != nil, "stream executor start: %v", err)
+	var streamBody []byte
+	for chunk := range stream.Chunks { require(chunk.Err == nil, "stream chunk: %v", chunk.Err); streamBody = append(streamBody, chunk.Payload...) }
+	require(bytes.Contains(streamBody, []byte("host-stream")), "stream executor payload: %s", streamBody)
+
+	description, handled, err := host.DescribeQuota(context.Background(), pluginID)
+	require(err == nil && handled && !description.SupportsReset, "quota describe: handled=%v response=%+v err=%v", handled, description, err)
+	quota, handled, err := host.FetchQuotaByPlugin(context.Background(), pluginID, pluginapi.QuotaFetchRequest{Provider: "commandcode", AuthID: auth.ID, Attributes: auth.Attributes, StorageJSON: authJSON})
+	require(err == nil && handled && len(quota.Groups) == 1 && len(quota.Groups[0].Buckets) == 3, "native quota: handled=%v response=%+v err=%v", handled, quota, err)
+	quota, handled, err = host.FetchQuotaByPlugin(context.Background(), pluginID, pluginapi.QuotaFetchRequest{Provider: "commandcode", AuthID: auth.ID, AuthIndex: auth.Index, Attributes: auth.Attributes})
+	require(err == nil && handled && len(quota.Groups) == 1, "native quota host auth lookup: handled=%v response=%+v err=%v", handled, quota, err)
+	_, handled, err = host.ResetQuotaByPlugin(context.Background(), pluginID, pluginapi.QuotaResetRequest{Provider: "commandcode", Attributes: auth.Attributes})
+	require(handled && err != nil && strings.Contains(err.Error(), "unsupported"), "quota reset: handled=%v err=%v", handled, err)
+
+	host.RegisterManagementRoutes(context.Background(), nil)
+	resourceReq := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/"+pluginID+"/quota", nil)
+	resourceRec := httptest.NewRecorder()
+	require(host.ServeResourceHTTP(resourceRec, resourceReq) && resourceRec.Code == http.StatusOK && strings.Contains(resourceRec.Body.String(), "CommandCode Quota"), "legacy resource: %d %s", resourceRec.Code, resourceRec.Body.String())
+	legacyReq := httptest.NewRequest(http.MethodPost, "/v0/management/plugins/"+pluginID+"/quota-usage", strings.NewReader(`{}`))
+	legacyRec := httptest.NewRecorder()
+	require(host.ServeManagementHTTP(legacyRec, legacyReq) && legacyRec.Code == http.StatusOK, "legacy API: %d %s", legacyRec.Code, legacyRec.Body.String())
+	var legacy struct { Cards []struct { KeyID string `json:"key_id"` } `json:"cards"` }
+	require(json.Unmarshal(legacyRec.Body.Bytes(), &legacy) == nil && len(legacy.Cards) == 1, "legacy list: %s", legacyRec.Body.String())
+	refreshReq := httptest.NewRequest(http.MethodPost, "/v0/management/plugins/"+pluginID+"/quota-usage", strings.NewReader(fmt.Sprintf(`{"key_id":%q}`, legacy.Cards[0].KeyID)))
+	refreshRec := httptest.NewRecorder()
+	require(host.ServeManagementHTTP(refreshRec, refreshReq) && refreshRec.Code == http.StatusOK, "legacy quota refresh: %d %s", refreshRec.Code, refreshRec.Body.String())
+	waitFor("email watcher convergence", func() bool { a := commandCodeAuths(authManager); return len(a) == 1 && a[0].ID == canonicalID && a[0].Index == canonicalIndex && a[0].Metadata["email"] == "host-integration@example.test" && a[0].Attributes["api_key"] == secret })
+	requireUniqueRows(authManager)
+
+	// Reconfigure and restart the real watcher against the existing files. Both
+	// paths must retain the one canonical CommandCode identity and executable key.
+	host.ApplyConfig(context.Background(), cfg)
+	waitFor("reconfigure convergence", func() bool { a := commandCodeAuths(authManager); return len(a) == 1 && a[0].ID == canonicalID && a[0].Index == canonicalIndex && a[0].Attributes["api_key"] == secret })
+	require(w.Stop() == nil, "stop watcher")
+	cancel()
+	restartCtx, restartCancel := context.WithCancel(context.Background())
+	defer restartCancel()
+	w = attachWatcher(restartCtx, configPath, authDir, cfg, host, authManager)
+	waitFor("watcher restart convergence", func() bool { a := commandCodeAuths(authManager); return len(a) == 1 && a[0].ID == canonicalID && a[0].Index == canonicalIndex && a[0].Attributes["api_key"] == secret })
+	requireUniqueRows(authManager)
+	codexAfter, ok := authManager.GetByID(codex.ID)
+	require(ok && codexAfter.Index == codexIndex, "codex identity/index changed: before=%q/%q after=%+v", codex.ID, codexIndex, codexAfter)
+	require(fmt.Sprintf("%v", codexAfter.RecentRequestsSnapshot(time.Now())) == fmt.Sprintf("%v", codexBuckets), "codex recent buckets changed")
+
+	host.ShutdownAll()
+	require(!host.PluginBusy(pluginID), "plugin remained loaded after shutdown")
+	fmt.Println("CPA_HOST_INTEGRATION_OK registered=1 version=0.2.0-dev.5 canonical_auth=1 watcher=email+reconfigure+restart codex=preserved rows=unique models=1 nonstream=ok stream=ok native_quota=ok legacy_resource=ok legacy_api=ok reset=unsupported shutdown=ok")
+}

@@ -15,14 +15,12 @@ import (
 // host can surface it as the credential's email (and the management panel can
 // title the entry with the mailbox instead of the key hash).
 //
-// The write goes straight to the file rather than through host.auth.save: the
-// host derives a saved record's ID from the file path (commandcode-key-<hash>.json)
-// while this plugin's ParseAuth returns the ID stored in the JSON (without the
-// .json suffix), and the host performs no path-based dedupe, so a save would
-// register a second credential for the same key that lacks the api_key routing
-// attribute and therefore fails every request routed to it. Writing the file
-// instead leaves the credential identity untouched and lets the auth-directory
-// watcher re-parse it through ParseAuth.
+// The write goes straight to the existing file rather than through
+// host.auth.save. ParseAuth deliberately leaves file-backed AuthData.ID empty,
+// so the auth-directory watcher and host.auth.save both canonicalize identity
+// from the same auth-dir-relative path (including .json). Atomic replacement
+// therefore updates that one logical credential; it does not create a second
+// physical auth file or add an email-based identity discriminator.
 //
 // The email is the only field that changes: the existing bytes are edited in
 // place, so api_key, disabled, label, id and any host-managed metadata survive

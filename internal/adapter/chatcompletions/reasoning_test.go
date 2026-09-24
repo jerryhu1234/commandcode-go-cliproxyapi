@@ -117,6 +117,7 @@ func TestStreamReasoningToResponses(t *testing.T) {
 	}
 	want := []string{
 		"response.created",
+		"response.in_progress",
 		"response.output_item.added", // reasoning @0
 		"response.reasoning_summary_part.added",
 		"response.reasoning_summary_text.delta",
@@ -125,14 +126,18 @@ func TestStreamReasoningToResponses(t *testing.T) {
 		"response.reasoning_summary_part.done",
 		"response.output_item.done",
 		"response.output_item.added", // message @1
+		"response.content_part.added",
 		"response.output_text.delta",
+		"response.output_text.done",
+		"response.content_part.done",
+		"response.output_item.done",
 		"response.completed",
 	}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("event sequence = %v, want %v", names, want)
 	}
 
-	added := evs[1].Data
+	added := evs[2].Data
 	item := added["item"].(map[string]any)
 	if added["output_index"] != float64(0) || item["type"] != "reasoning" ||
 		item["id"] != "rs_c1_0" || item["status"] != "in_progress" {
@@ -141,28 +146,28 @@ func TestStreamReasoningToResponses(t *testing.T) {
 	if summary, ok := item["summary"].([]any); !ok || len(summary) != 0 {
 		t.Fatalf("announced summary must be empty: %v", item)
 	}
-	part := evs[2].Data
+	part := evs[3].Data
 	if part["item_id"] != "rs_c1_0" || part["output_index"] != float64(0) || part["summary_index"] != float64(0) ||
 		part["part"].(map[string]any)["type"] != "summary_text" {
 		t.Fatalf("summary part announcement wrong: %v", part)
 	}
-	if d := evs[3].Data; d["delta"] != "We" || d["item_id"] != "rs_c1_0" || d["summary_index"] != float64(0) {
+	if d := evs[4].Data; d["delta"] != "We" || d["item_id"] != "rs_c1_0" || d["summary_index"] != float64(0) {
 		t.Fatalf("first summary delta wrong: %v", d)
 	}
-	if d := evs[5].Data; d["text"] != "We need" {
+	if d := evs[6].Data; d["text"] != "We need" {
 		t.Fatalf("summary done must carry the accumulated text: %v", d)
 	}
-	if done := evs[7].Data["item"].(map[string]any); done["type"] != "reasoning" ||
+	if done := evs[8].Data["item"].(map[string]any); done["type"] != "reasoning" ||
 		done["summary"].([]any)[0].(map[string]any)["text"] != "We need" {
 		t.Fatalf("reasoning item done wrong: %v", evs[7].Data)
 	}
-	if msg := evs[8].Data; msg["output_index"] != float64(1) {
+	if msg := evs[9].Data; msg["output_index"] != float64(1) {
 		t.Fatalf("message must follow the reasoning item: %v", msg)
 	}
 
 	// The first finish_reason (stop) is the one held: the post-finish line's
 	// own finish_reason is ignored as a repeat.
-	completed := evs[10].Data["response"].(map[string]any)
+	completed := evs[len(evs)-1].Data["response"].(map[string]any)
 	if completed["status"] != "completed" {
 		t.Fatalf("status = %v, want completed", completed["status"])
 	}

@@ -15,11 +15,12 @@ import (
 
 // Defaults (spec 04 §2/§4).
 const (
-	DefaultBaseURL          = "https://api.commandcode.ai/provider/v1"
-	DefaultModelPrefix      = "commandcode"
-	DefaultRefreshInterval  = 15 * time.Minute
-	DefaultRequestTimeout   = 5 * time.Minute
-	DefaultMaxResponseBytes = int64(67108864) // 64 MiB
+	DefaultBaseURL                = "https://api.commandcode.ai/provider/v1"
+	DefaultModelPrefix            = "commandcode"
+	DefaultRefreshInterval        = 15 * time.Minute
+	DefaultRequestTimeout         = 5 * time.Minute
+	DefaultMaxResponseBytes       = int64(67108864) // 64 MiB
+	DefaultResponsesCompatibility = "cpa"
 )
 
 type ModelPrefix struct {
@@ -48,32 +49,34 @@ type RouteOverride struct {
 }
 
 type Config struct {
-	BaseURL          string
-	CatalogURL       string
-	ModelPrefix      ModelPrefix
-	APIKeys          []APIKey
-	Catalog          Catalog
-	Protocols        Protocols
-	RouteOverrides   map[string]RouteOverride
-	AllowHTTP        bool
-	RequestTimeout   time.Duration
-	MaxResponseBytes int64
+	BaseURL                string
+	CatalogURL             string
+	ModelPrefix            ModelPrefix
+	APIKeys                []APIKey
+	Catalog                Catalog
+	Protocols              Protocols
+	RouteOverrides         map[string]RouteOverride
+	AllowHTTP              bool
+	RequestTimeout         time.Duration
+	MaxResponseBytes       int64
+	ResponsesCompatibility string
 }
 
 // rawConfig mirrors the YAML shape; pointer fields distinguish "unset"
 // (apply default) from explicitly-set values including "" (validate as-is).
 // Unknown fields are ignored (host may pass extra keys).
 type rawConfig struct {
-	BaseURL          *string                  `yaml:"base-url"`
-	CatalogURL       *string                  `yaml:"catalog-url"`
-	ModelPrefix      rawPrefix                `yaml:"model-prefix"`
-	APIKeys          []rawKey                 `yaml:"api-keys"`
-	Catalog          rawCatalog               `yaml:"catalog"`
-	Protocols        rawProtocols             `yaml:"protocols"`
-	RouteOverrides   map[string]RouteOverride `yaml:"route-overrides"`
-	AllowHTTP        bool                     `yaml:"allow-http"`
-	RequestTimeout   *string                  `yaml:"request-timeout"`
-	MaxResponseBytes *int64                   `yaml:"max-response-bytes"`
+	BaseURL                *string                  `yaml:"base-url"`
+	CatalogURL             *string                  `yaml:"catalog-url"`
+	ModelPrefix            rawPrefix                `yaml:"model-prefix"`
+	APIKeys                []rawKey                 `yaml:"api-keys"`
+	Catalog                rawCatalog               `yaml:"catalog"`
+	Protocols              rawProtocols             `yaml:"protocols"`
+	RouteOverrides         map[string]RouteOverride `yaml:"route-overrides"`
+	AllowHTTP              bool                     `yaml:"allow-http"`
+	RequestTimeout         *string                  `yaml:"request-timeout"`
+	MaxResponseBytes       *int64                   `yaml:"max-response-bytes"`
+	ResponsesCompatibility *string                  `yaml:"responses-compatibility"`
 }
 
 type rawPrefix struct {
@@ -143,10 +146,11 @@ func Load(yamlBytes []byte) (Config, error) {
 			Messages:        orDefault(raw.Protocols.Messages, true),
 			Responses:       orDefault(raw.Protocols.Responses, true),
 		},
-		RouteOverrides:   raw.RouteOverrides,
-		AllowHTTP:        raw.AllowHTTP,
-		RequestTimeout:   requestTimeout,
-		MaxResponseBytes: orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
+		RouteOverrides:         raw.RouteOverrides,
+		AllowHTTP:              raw.AllowHTTP,
+		RequestTimeout:         requestTimeout,
+		MaxResponseBytes:       orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
+		ResponsesCompatibility: strings.ToLower(strings.TrimSpace(orDefault(raw.ResponsesCompatibility, DefaultResponsesCompatibility))),
 	}
 	if raw.CatalogURL != nil {
 		// Mirror the derived-default trim so an explicit trailing-slash
@@ -196,6 +200,9 @@ func (c Config) validate() error {
 	}
 	if c.MaxResponseBytes <= 0 {
 		return fmt.Errorf("max-response-bytes: must be positive")
+	}
+	if c.ResponsesCompatibility != "cpa" && c.ResponsesCompatibility != "strict" {
+		return fmt.Errorf("responses-compatibility: must be cpa or strict")
 	}
 	for name, o := range c.RouteOverrides {
 		if !validProtocols[o.Protocol] {
