@@ -19,6 +19,10 @@ const (
 	DefaultModelPrefix            = "commandcode"
 	DefaultRefreshInterval        = 15 * time.Minute
 	DefaultRequestTimeout         = 5 * time.Minute
+	DefaultStreamFirstDataTimeout = 60 * time.Second
+	DefaultStreamIdleTimeout      = 3 * time.Minute
+	DefaultStreamTotalTimeout     = 30 * time.Minute
+	DefaultStreamFinishGrace      = 15 * time.Second
 	DefaultMaxResponseBytes       = int64(67108864) // 64 MiB
 	DefaultResponsesCompatibility = "cpa"
 )
@@ -58,6 +62,10 @@ type Config struct {
 	RouteOverrides         map[string]RouteOverride
 	AllowHTTP              bool
 	RequestTimeout         time.Duration
+	StreamFirstDataTimeout time.Duration
+	StreamIdleTimeout      time.Duration
+	StreamTotalTimeout     time.Duration
+	StreamFinishGrace      time.Duration
 	MaxResponseBytes       int64
 	ResponsesCompatibility string
 }
@@ -75,6 +83,10 @@ type rawConfig struct {
 	RouteOverrides         map[string]RouteOverride `yaml:"route-overrides"`
 	AllowHTTP              bool                     `yaml:"allow-http"`
 	RequestTimeout         *string                  `yaml:"request-timeout"`
+	StreamFirstDataTimeout *string                  `yaml:"stream-first-data-timeout"`
+	StreamIdleTimeout      *string                  `yaml:"stream-idle-timeout"`
+	StreamTotalTimeout     *string                  `yaml:"stream-total-timeout"`
+	StreamFinishGrace      *string                  `yaml:"stream-finish-grace"`
 	MaxResponseBytes       *int64                   `yaml:"max-response-bytes"`
 	ResponsesCompatibility *string                  `yaml:"responses-compatibility"`
 }
@@ -130,6 +142,43 @@ func Load(yamlBytes []byte) (Config, error) {
 	if requestTimeout <= 0 {
 		return Config{}, fmt.Errorf("request-timeout: must be positive")
 	}
+	streamFirstDataTimeout, err := parseDuration("stream-first-data-timeout", raw.StreamFirstDataTimeout, DefaultStreamFirstDataTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	if streamFirstDataTimeout <= 0 {
+		return Config{}, fmt.Errorf("stream-first-data-timeout: must be positive")
+	}
+	streamIdleTimeout, err := parseDuration("stream-idle-timeout", raw.StreamIdleTimeout, DefaultStreamIdleTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	if streamIdleTimeout <= 0 {
+		return Config{}, fmt.Errorf("stream-idle-timeout: must be positive")
+	}
+	streamTotalTimeout, err := parseDuration("stream-total-timeout", raw.StreamTotalTimeout, DefaultStreamTotalTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	if streamTotalTimeout <= 0 {
+		return Config{}, fmt.Errorf("stream-total-timeout: must be positive")
+	}
+	streamFinishGrace, err := parseDuration("stream-finish-grace", raw.StreamFinishGrace, DefaultStreamFinishGrace)
+	if err != nil {
+		return Config{}, err
+	}
+	if streamFinishGrace <= 0 {
+		return Config{}, fmt.Errorf("stream-finish-grace: must be positive")
+	}
+	if streamTotalTimeout < streamFirstDataTimeout {
+		return Config{}, fmt.Errorf("stream-total-timeout: must be at least stream-first-data-timeout")
+	}
+	if streamTotalTimeout < streamIdleTimeout {
+		return Config{}, fmt.Errorf("stream-total-timeout: must be at least stream-idle-timeout")
+	}
+	if streamFinishGrace > streamIdleTimeout {
+		return Config{}, fmt.Errorf("stream-finish-grace: must not exceed stream-idle-timeout")
+	}
 	c := Config{
 		BaseURL: orDefault(raw.BaseURL, DefaultBaseURL),
 		ModelPrefix: ModelPrefix{
@@ -149,6 +198,10 @@ func Load(yamlBytes []byte) (Config, error) {
 		RouteOverrides:         raw.RouteOverrides,
 		AllowHTTP:              raw.AllowHTTP,
 		RequestTimeout:         requestTimeout,
+		StreamFirstDataTimeout: streamFirstDataTimeout,
+		StreamIdleTimeout:      streamIdleTimeout,
+		StreamTotalTimeout:     streamTotalTimeout,
+		StreamFinishGrace:      streamFinishGrace,
 		MaxResponseBytes:       orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
 		ResponsesCompatibility: strings.ToLower(strings.TrimSpace(orDefault(raw.ResponsesCompatibility, DefaultResponsesCompatibility))),
 	}

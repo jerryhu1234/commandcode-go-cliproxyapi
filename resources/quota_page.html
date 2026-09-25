@@ -47,8 +47,14 @@ html, body { min-height: 100%; }
 body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--bg-secondary); font: 14px/1.45 system-ui, sans-serif; }
 .quota-page { max-width: 1160px; margin: 0 auto; }
 .quota-header { margin-bottom: 24px; }
+.quota-header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .quota-title { margin: 0; font-size: 28px; font-weight: 700; line-height: 1.2; }
 .quota-description { margin: 8px 0 0; color: var(--text-secondary); }
+.quota-summary { margin: 14px 0 0; color: var(--text-secondary); font-size: 13px; }
+.quota-summary strong { color: var(--text-primary); }
+.quota-batch { flex: 0 0 auto; border: 1px solid var(--primary-color); border-radius: 8px; padding: 9px 13px; color: #fff; background: var(--primary-color); font: inherit; font-size: 13px; cursor: pointer; }
+.quota-batch:hover { background: var(--primary-hover); }
+.quota-batch:disabled { cursor: not-allowed; opacity: .6; }
 .quota-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; }
 .quota-card { padding: 20px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary); box-shadow: var(--shadow); }
 .quota-card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
@@ -74,12 +80,14 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
 @media (max-width: 768px) {
   body { padding: 20px 16px; }
   .quota-grid { grid-template-columns: 1fr; }
+  .quota-header-row { align-items: stretch; flex-direction: column; }
+  .quota-batch { width: 100%; }
 }
 </style>
 </head>
 <body>
 <div class="quota-page">
-  <header class="quota-header"><h1 class="quota-title">CommandCode Quota</h1><p class="quota-description">Usage for each configured credential. New accounts refresh automatically.</p></header>
+  <header class="quota-header"><div class="quota-header-row"><div><h1 class="quota-title">CommandCode Quota</h1><p class="quota-description">Usage for each configured credential. New accounts refresh automatically.</p></div><button id="refresh-all" class="quota-batch" type="button" disabled>Refresh all</button></div><p id="quota-summary" class="quota-summary" role="status" aria-live="polite">Loading credentials...</p></header>
   <main id="app"><p class="quota-muted">Loading credentials...</p></main>
 </div>
 <script>
@@ -115,6 +123,12 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   const fetchedAt = new Map();
   const errors = new Map();
   const inFlight = new Set();
+  const queued = new Set();
+  const jobs = new Map();
+  const queue = [];
+  let activeJobs = 0;
+  let batchActive = false;
+  let batchState = null;
   let pageAuthKey = "";
   let cache = {};
   try {
@@ -139,28 +153,54 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
     cache[keyID] = {usage, fetched_at: timestamp, label: labels.get(keyID) || ""};
     saveCache();
   }
-  function refreshCard(card, cards, alreadyQueued) {
-    if (!alreadyQueued) {
-      if (inFlight.has(card.key_id)) return Promise.resolve();
-      inFlight.add(card.key_id);
-      errors.delete(card.key_id);
-      render(cards);
+  function safeError(error) { return error && error.message ? error.message : "Refresh failed"; }
+  function updateBatch(result) {
+    if (!batchState) return;
+    if (result.ok) batchState.success++; else batchState.failed++;
+    batchState.done++;
+    render(batchState.cards);
+  }
+  function pump() {
+    while (activeJobs < 2 && queue.length) {
+      const job = queue.shift();
+      queued.delete(job.card.key_id); inFlight.add(job.card.key_id); activeJobs++;
+      errors.delete(job.card.key_id); render(job.cards);
+      request({key_id: job.card.key_id}).then(result => {
+        // The management response is allowed to contain an upstream-facing
+        // diagnostic. Never put that diagnostic in the page; the server has
+        // already reduced transport failures to a safe card error where
+        // possible, and the UI keeps its own message generic regardless.
+        if (result.error) throw new Error("Quota refresh failed");
+        if (result.email) job.card.email = result.email;
+        applyUsage(job.card.key_id, result.usage, result.label);
+        job.result = {ok: true, key_id: job.card.key_id};
+        return job.result;
+      }).catch(error => {
+        errors.set(job.card.key_id, safeError(error));
+        job.result = {ok: false, key_id: job.card.key_id, error: safeError(error)};
+        return job.result;
+      }).then(result => {
+        inFlight.delete(job.card.key_id); activeJobs--;
+        job.resolve(result); updateBatch(result); render(job.cards); pump();
+      });
     }
-    return request({key_id: card.key_id}).then(result => {
-      inFlight.delete(card.key_id);
-      if (result.error) {
-        errors.set(card.key_id, result.error);
-        render(cards);
-        return;
-      }
-      if (result.email) card.email = result.email;
-      applyUsage(card.key_id, result.usage, result.label);
-      render(cards);
-    }).catch(err => {
-      inFlight.delete(card.key_id);
-      errors.set(card.key_id, err.message || "Refresh failed");
-      render(cards);
-    });
+  }
+  function refreshCard(card, cards) {
+    const existing = jobs.get(card.key_id);
+    if (existing) return existing.promise;
+    let resolve;
+    const promise = new Promise(done => { resolve = done; });
+    const job = {card, cards, resolve, promise};
+    jobs.set(card.key_id, job); queued.add(card.key_id); queue.push(job); render(cards); pump();
+    promise.then(() => jobs.delete(card.key_id));
+    return promise;
+  }
+  function refreshAll(cards) {
+    if (batchActive || !cards.length) return Promise.resolve([]);
+    batchActive = true; batchState = {cards, total: cards.length, done: 0, success: 0, failed: 0};
+    render(cards);
+    const promises = cards.map(card => refreshCard(card, cards));
+    return Promise.all(promises).then(results => { batchActive = false; render(cards); return results; });
   }
   function authStatus() {
     const missing = status => ({key: "", status});
@@ -241,6 +281,14 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   }
   function render(cards) {
     app.textContent = "";
+    const batchButton = document.getElementById("refresh-all");
+    const summary = document.getElementById("quota-summary");
+    if (batchButton) { batchButton.disabled = batchActive || !cards.length; batchButton.textContent = batchActive ? "Refreshing all..." : "Refresh all"; }
+    if (summary) {
+      if (batchState && batchActive) summary.textContent = "Refreshing " + batchState.done + " of " + batchState.total + " accounts" + (batchState.failed ? " · " + batchState.failed + " failed" : "");
+      else if (batchState && batchState.done === batchState.total) summary.textContent = "Finished: " + batchState.success + " succeeded, " + batchState.failed + " failed";
+      else summary.textContent = cards.length ? cards.length + " configured account" + (cards.length === 1 ? "" : "s") : "No configured credentials.";
+    }
     if (!cards.length) { const p = document.createElement("p"); p.className = "quota-muted"; p.setAttribute("role", "status"); p.textContent = "No configured credentials."; app.appendChild(p); return; }
     const grid = document.createElement("div"); grid.className = "quota-grid";
     cards.forEach(card => {
@@ -268,13 +316,16 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
       const updated = fetchedAt.get(card.key_id);
       if (updated) { const timestamp = document.createElement("div"); timestamp.className = "quota-meta"; timestamp.textContent = "Updated " + new Date(updated).toLocaleString(); section.appendChild(timestamp); }
       const actions = document.createElement("div"); actions.className = "quota-actions";
-      const button = document.createElement("button"); button.className = "quota-refresh"; button.textContent = inFlight.has(card.key_id) ? "Refreshing..." : "Refresh"; button.disabled = inFlight.has(card.key_id); button.setAttribute("aria-label", "Refresh " + card.label);
+       const busy = inFlight.has(card.key_id) || queued.has(card.key_id);
+       const button = document.createElement("button"); button.className = "quota-refresh"; button.textContent = busy ? (inFlight.has(card.key_id) ? "Refreshing..." : "Queued...") : "Refresh"; button.disabled = busy; button.setAttribute("aria-label", "Refresh " + card.label);
       const error = document.createElement("span"); error.className = "quota-error"; error.setAttribute("role", "status"); error.textContent = errors.get(card.key_id) || "";
       button.onclick = () => { refreshCard(card, cards); };
       actions.append(button, error); section.appendChild(actions); grid.appendChild(section);
     });
     app.appendChild(grid);
-  }
+   }
+   document.getElementById("refresh-all").onclick = () => { if (currentCards) refreshAll(currentCards); };
+   let currentCards = [];
   function showMessage(message, help) {
     app.textContent = "";
     const p = document.createElement("p"); p.className = "quota-error"; p.setAttribute("role", "status"); p.textContent = message; app.appendChild(p);
@@ -292,6 +343,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   }
   request({}).then(result => {
     const cards = result.cards || [];
+    currentCards = cards;
     const configured = new Set(cards.map(card => card.key_id));
     Object.keys(cache).forEach(keyID => {
       if (!configured.has(keyID)) { delete cache[keyID]; values.delete(keyID); labels.delete(keyID); fetchedAt.delete(keyID); }
@@ -300,10 +352,8 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
       if (card.email && !labels.has(card.key_id)) labels.set(card.key_id, card.label);
     });
     saveCache();
-    const missing = cards.filter(card => !card.email);
-    missing.forEach(card => inFlight.add(card.key_id));
     render(cards);
-    missing.forEach(card => refreshCard(card, cards, true));
+    cards.filter(card => !card.email).forEach(card => refreshCard(card, cards));
   }).catch(err => { app.textContent = ""; const p = document.createElement("p"); p.className = "quota-error"; p.setAttribute("role", "status"); p.textContent = err.message || "Unable to load credentials."; app.appendChild(p); });
 })();
 </script>

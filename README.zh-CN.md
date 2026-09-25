@@ -48,7 +48,7 @@ CommandCode Go/GOAT/Pro/Max 通过它的 OpenAI 兼容入口访问：
   - OpenAI 客户端：每个 chunk 回填 `reasoning_content`，厂商原始字段保持不变。
 - **能力感知的思考控制**：`route-overrides` 或模型目录里的 thinking 元数据一旦声明能力，就恢复严格校验与预算夹取；没有任何声明时，客户端的 `reasoning_effort` 原样转发（`auto`/`none` 省略该字段），以上游为准。
 - **动态目录发现**：远程目录 + 本地兜底、去重，并对被排除的模型给出诊断。
-- **CommandCode 配额页面**：管理后台单独一页，列出每个凭据对应的账号邮箱、套餐、剩余套餐额度和滚动 5 小时/每周窗口（已用、上限、重置时间），每张卡片按需独立刷新。
+- **CommandCode 配额页面**：管理后台单独一页，列出每个凭据对应的账号邮箱、套餐、剩余套餐额度和滚动 5 小时/每周窗口（已用、上限、重置时间），支持单卡刷新和“全部刷新”。
 - **多密钥调度**：一份 key 池通过 CLIProxyAPI 原生调度器跨所有协议共享。
 - **原生与旧版配额**：CPA v7.3.15 的只读 QuotaProvider 与管理页共用账号数据；不支持 reset。
 - **Responses 工具与流式兼容**：支持 custom、一层 namespace、`additional_tools`、strict/JSON Schema，并输出完整 Responses SSE 生命周期。
@@ -121,6 +121,10 @@ plugins:
           endpoint: "/v1/messages"        # 必填，必须以 "/" 开头
 
       request-timeout: "5m"
+      stream-first-data-timeout: "60s"
+      stream-idle-timeout: "3m"
+      stream-total-timeout: "30m"
+      stream-finish-grace: "15s"
       max-response-bytes: 67108864        # 64 MiB
       allow-http: false                   # 本地测试允许 http://
 ```
@@ -140,6 +144,10 @@ plugins:
 | `responses-compatibility` | `string` | `cpa` | `cpa` 对齐 CPA v7.3.15 的降级规则；`strict` 在上游调用前拒绝不支持或有状态的 Responses 语义。 |
 | `route-overrides` | `map` | `{}` | `{ 模型: { protocol, endpoint } }`，把某个模型钉到别的上游路由；`endpoint` 必填。 |
 | `request-timeout` | `duration` | `5m` | 上游 HTTP 超时（配额/账号请求另按 30s 上限）。 |
+| `stream-first-data-timeout` | `duration` | `60s` | 从打开流开始等待首次有意义协议进展的上限。 |
+| `stream-idle-timeout` | `duration` | `3m` | 仅有意义进展续期；ping、注释和重复帧不续期。 |
+| `stream-total-timeout` | `duration` | `30m` | 流的绝对总时长，不续期。 |
+| `stream-finish-grace` | `duration` | `15s` | finish 后等待 usage/DONE 并安全结束的最长时间。 |
 | `max-response-bytes` | `int64` | `67108864` | 非流式响应体上限。 |
 | `allow-http` | `bool` | `false` | 允许 `http://` 上游，仅供本地测试。 |
 
@@ -153,7 +161,7 @@ plugins:
 | `GET {authority}/alpha/billing/subscriptions` | 套餐 id/状态 |
 | `GET {authority}/alpha/whoami?limits=1` | 卡片标题用的账号邮箱 |
 
-`{authority}` 由 `base-url` 去掉 provider 路径（`/provider/v1`）得到。每张卡片手动独立刷新，页面从不轮询，配额数值也不参与路由决策。
+`{authority}` 由 `base-url` 去掉 provider 路径（`/provider/v1`）得到。刷新均由用户手动触发，可刷新单卡或使用“全部刷新”；两条路径共用同一队列，最多同时发出 2 个账号请求。没有邮箱信息的卡片首次初始化以及批量中的所有请求也受此限制。批量刷新先显示 `done/total` 进度，完成后显示精确的成功/失败数量；刷新失败时保留该卡片已有的缓存数据和时间戳。页面从不轮询，配额数值也不参与路由决策。
 
 管理页必须与 Management Center 同源。它兼容明文、`enc::v1::` 和
 `enc::v2::` 的本地认证存储；iframe 自身存储中没有可用凭据时不会发送请求。这不是独立的跨源访问控制机制。Manager 的
@@ -173,6 +181,16 @@ plugins:
 实际执行 code interpreter、web/file search 或 computer。需要禁止语义降级时
 使用 `strict`。一层 namespace 支持，嵌套、冲突、歧义裸名和超长名会拒绝。
 JSON Schema/strict 只保证协议字段保留，不保证上游模型执行约束。
+
+### 未发布的 v0.2.6-dev.1 流控制
+
+`request-timeout` 不再限制流式请求，仍继续用于非流式和配额/账号请求。
+流式请求分别使用 60 秒首个有效数据、3 分钟 idle、30 分钟绝对总时长和
+15 秒 finish grace。只有解析成功且状态实际变化的帧会续 idle；心跳、注释、
+空白、partial bytes、重复 start/item 和未变化 usage 不会续期。finish grace
+最多等待尾部 usage/DONE；若此前状态完整可正常结束，否则报错。没有 finish 或
+terminal 证据的 clean EOF 明确视为截断，不伪造成功。日志只含固定 cause、耗时、
+字节/分块数和终止证据，不含 payload、密钥、URL、header、账号或原始错误。
 
 ### reasoning effort（思考强度）
 

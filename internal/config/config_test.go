@@ -52,6 +52,18 @@ func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	if c.RequestTimeout != 5*time.Minute {
 		t.Errorf("RequestTimeout = %v", c.RequestTimeout)
 	}
+	if c.StreamFirstDataTimeout != 60*time.Second {
+		t.Errorf("StreamFirstDataTimeout = %v", c.StreamFirstDataTimeout)
+	}
+	if c.StreamIdleTimeout != 3*time.Minute {
+		t.Errorf("StreamIdleTimeout = %v", c.StreamIdleTimeout)
+	}
+	if c.StreamTotalTimeout != 30*time.Minute {
+		t.Errorf("StreamTotalTimeout = %v", c.StreamTotalTimeout)
+	}
+	if c.StreamFinishGrace != 15*time.Second {
+		t.Errorf("StreamFinishGrace = %v", c.StreamFinishGrace)
+	}
 	if c.MaxResponseBytes != 67108864 {
 		t.Errorf("MaxResponseBytes = %d", c.MaxResponseBytes)
 	}
@@ -96,6 +108,10 @@ route-overrides:
     endpoint: /v1/responses
 allow-http: true
 request-timeout: 5m
+stream-first-data-timeout: 2s
+stream-idle-timeout: 4s
+stream-total-timeout: 6s
+stream-finish-grace: 1s
 max-response-bytes: 1024
 `
 	c, err := Load([]byte(doc))
@@ -133,8 +149,73 @@ max-response-bytes: 1024
 	if c.RequestTimeout != 5*time.Minute {
 		t.Errorf("RequestTimeout = %v", c.RequestTimeout)
 	}
+	if c.StreamFirstDataTimeout != 2*time.Second || c.StreamIdleTimeout != 4*time.Second ||
+		c.StreamTotalTimeout != 6*time.Second || c.StreamFinishGrace != time.Second {
+		t.Errorf("stream timeouts = first %v, idle %v, total %v, grace %v",
+			c.StreamFirstDataTimeout, c.StreamIdleTimeout, c.StreamTotalTimeout, c.StreamFinishGrace)
+	}
 	if c.MaxResponseBytes != 1024 {
 		t.Errorf("MaxResponseBytes = %d", c.MaxResponseBytes)
+	}
+}
+
+func TestStreamTimeoutsAcceptSmallDurations(t *testing.T) {
+	doc := withKey +
+		"stream-first-data-timeout: 1ns\n" +
+		"stream-idle-timeout: 2ns\n" +
+		"stream-total-timeout: 3ns\n" +
+		"stream-finish-grace: 1ns\n"
+	c, err := Load([]byte(doc))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if c.StreamFirstDataTimeout != time.Nanosecond || c.StreamIdleTimeout != 2*time.Nanosecond ||
+		c.StreamTotalTimeout != 3*time.Nanosecond || c.StreamFinishGrace != time.Nanosecond {
+		t.Fatalf("small stream timeouts not preserved: %+v", c)
+	}
+}
+
+func TestRequestTimeoutDoesNotDeriveStreamTimeouts(t *testing.T) {
+	c, err := Load([]byte(withKey + "request-timeout: 1s\n"))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if c.RequestTimeout != time.Second || c.StreamFirstDataTimeout != DefaultStreamFirstDataTimeout ||
+		c.StreamIdleTimeout != DefaultStreamIdleTimeout || c.StreamTotalTimeout != DefaultStreamTotalTimeout ||
+		c.StreamFinishGrace != DefaultStreamFinishGrace {
+		t.Fatalf("request timeout affected stream defaults: %+v", c)
+	}
+}
+
+func TestStreamTimeoutRejections(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{"first empty", `stream-first-data-timeout: ""`, "stream-first-data-timeout: invalid duration"},
+		{"first negative", "stream-first-data-timeout: -1s", "stream-first-data-timeout: must be positive"},
+		{"first zero", "stream-first-data-timeout: 0s", "stream-first-data-timeout: must be positive"},
+		{"idle empty", `stream-idle-timeout: ""`, "stream-idle-timeout: invalid duration"},
+		{"idle negative", "stream-idle-timeout: -1s", "stream-idle-timeout: must be positive"},
+		{"idle zero", "stream-idle-timeout: 0s", "stream-idle-timeout: must be positive"},
+		{"total empty", `stream-total-timeout: ""`, "stream-total-timeout: invalid duration"},
+		{"total negative", "stream-total-timeout: -1s", "stream-total-timeout: must be positive"},
+		{"total zero", "stream-total-timeout: 0s", "stream-total-timeout: must be positive"},
+		{"grace empty", `stream-finish-grace: ""`, "stream-finish-grace: invalid duration"},
+		{"grace negative", "stream-finish-grace: -1s", "stream-finish-grace: must be positive"},
+		{"grace zero", "stream-finish-grace: 0s", "stream-finish-grace: must be positive"},
+		{"total below first", "stream-first-data-timeout: 4s\nstream-idle-timeout: 2s\nstream-total-timeout: 3s\nstream-finish-grace: 1s", "stream-total-timeout: must be at least stream-first-data-timeout"},
+		{"total below idle", "stream-first-data-timeout: 2s\nstream-idle-timeout: 4s\nstream-total-timeout: 3s\nstream-finish-grace: 1s", "stream-total-timeout: must be at least stream-idle-timeout"},
+		{"grace above idle", "stream-first-data-timeout: 1s\nstream-idle-timeout: 2s\nstream-total-timeout: 3s\nstream-finish-grace: 3s", "stream-finish-grace: must not exceed stream-idle-timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load([]byte(withKey + tt.yaml + "\n"))
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("error = %v, want exactly %q", err, tt.want)
+			}
+		})
 	}
 }
 

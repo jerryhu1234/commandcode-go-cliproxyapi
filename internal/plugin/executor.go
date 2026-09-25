@@ -11,10 +11,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -378,6 +378,7 @@ func (m *Manager) handleExecuteStream(request []byte) ([]byte, error) {
 // a background goroutine and executeStream returns okEnvelope immediately so the
 // host can start draining chunks to the downstream client without buffer deadlocks.
 func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
+	streamStart := time.Now()
 	res, failEnv := m.resolveExecution(req)
 	if res == nil {
 		return failEnv, nil
@@ -394,7 +395,8 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 
 	url := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
 	debugTrace("executor sending stream url=%s body_len=%d", url, len(upstreamBody))
-	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
+	limits := limitsFromConfig(res.cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), limits.first)
 	defer cancel()
 	st, _, id, err := m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
 		Method:  http.MethodPost,
@@ -404,6 +406,11 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 	})
 	debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v", st, id, err)
 	if err != nil {
+		cause := "start_error"
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out") {
+			cause = "start_timeout"
+		}
+		m.logStreamFinished(res.rec.Protocol, req.SourceFormat, cause, streamStart, nil, nil, nil, 0, 0, shared.StreamSnapshot{}, false)
 		return classEnvelope(errclass.FromNetwork(err)), nil
 	}
 	if st >= 400 {
@@ -419,6 +426,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 			}
 			_ = m.bridge.StreamClose(id)
 		}
+		m.logStreamFinished(res.rec.Protocol, req.SourceFormat, "http_status", streamStart, nil, nil, nil, int64(len(body)), 0, shared.StreamSnapshot{}, false)
 		return classEnvelope(shared.UpstreamStatusError(st, body)), nil
 	}
 
@@ -430,12 +438,12 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		if m.bridge != nil {
 			defer m.bridge.inFlight.Done()
 		}
-		m.pumpStream(downID, id, res, req.SourceFormat, responsesRequestContext(req))
+		m.pumpStream(downID, id, res, req.SourceFormat, streamStart, responsesRequestContext(req))
 	}()
 	return okEnvelope(struct{}{}), nil
 }
 
-func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string, originalRequest ...[]byte) {
+func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string, streamStart time.Time, originalRequest ...[]byte) {
 	var closeOnce sync.Once
 	closeStreams := func(downErrMsg string) {
 		closeOnce.Do(func() {
@@ -445,52 +453,106 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	}
 	defer closeStreams("")
 
-	var aborted atomic.Bool
-	watchdog := time.AfterFunc(res.cfg.RequestTimeout, func() {
-		defer func() {
-			if r := recover(); r != nil && m.bridge != nil {
-				_ = m.bridge.Log("error", "stream watchdog panicked", nil)
-			}
-		}()
-		aborted.Store(true)
-		_ = m.bridge.StreamClose(upstreamID)
-	})
-	defer watchdog.Stop()
-
 	conv := newStreamConverter(res.rec.Protocol, sourceFormat, originalRequest...)
+	limits := limitsFromConfig(res.cfg)
+	controller := newStreamController(m.bridge, upstreamID, streamStart, limits)
+	controller.firstData(time.Until(streamStart.Add(limits.first)))
+	defer controller.stop()
+	type snapshotter interface{ StreamSnapshot() shared.StreamSnapshot }
+	snapper, _ := conv.(snapshotter)
+	var lastSnapshot shared.StreamSnapshot
 	var (
 		total          int64
 		upstreamClosed bool
 		convDone       bool
+		chunks         int64
 	)
+	headersAt := time.Now()
+	var firstDataAt, lastProgressAt *time.Time
+	logged := false
+	logDone := func(cause string, eof bool) {
+		if logged {
+			return
+		}
+		logged = true
+		m.logStreamFinished(res.rec.Protocol, sourceFormat, cause, streamStart, &headersAt, firstDataAt, lastProgressAt, total, chunks, lastSnapshot, eof)
+	}
+	finishCause := ""
 	for {
 		payload, readErrMsg, closed, err := m.bridge.StreamRead(upstreamID)
 		debugTrace("executor stream read chunk_len=%d closed=%t readErrMsg=%q err=%v", len(payload), closed, readErrMsg, err)
 		upstreamClosed = closed
-		if aborted.Load() {
-			closeStreams(errclass.Redact("stream exceeded request-timeout"))
+		if cause := controller.Cause(); cause != "" {
+			finishCause = cause
+			if cause == "finish_grace" {
+				if finalizer, ok := conv.(interface {
+					FinalizeStream() ([][]byte, *errclass.Error)
+				}); ok {
+					events, fErr := finalizer.FinalizeStream()
+					if fErr != nil {
+						closeStreams(errclass.Redact(fErr.Message))
+						logDone("terminal_error", upstreamClosed)
+						return
+					}
+					if emitErr := m.emitAll(downID, events); emitErr != nil {
+						closeStreams(errclass.Redact(emitErr.Error()))
+						logDone("emit_error", upstreamClosed)
+						return
+					}
+					logDone("finish_grace", upstreamClosed)
+					return
+				}
+				closeStreams("stream terminal incomplete")
+				logDone("terminal_error", upstreamClosed)
+				return
+			}
+			closeStreams(streamCauseError(cause))
+			logDone(cause, upstreamClosed)
 			return
 		}
 		if err != nil {
 			closeStreams(errclass.Redact(err.Error()))
+			logDone("read_error", upstreamClosed)
 			return
 		}
 		if readErrMsg != "" {
 			closeStreams(errclass.Redact(readErrMsg))
+			logDone("upstream_error", upstreamClosed)
 			return
 		}
 		total += int64(len(payload))
+		if len(payload) > 0 {
+			chunks++
+		}
 		if total > res.cfg.MaxResponseBytes {
 			closeStreams(errclass.Redact("stream exceeded max-response-bytes"))
+			logDone("max_bytes", upstreamClosed)
 			return
 		}
 		events, done, convErr := conv.Feed(payload)
+		if snapper != nil {
+			snap := snapper.StreamSnapshot()
+			if snap.Progress > lastSnapshot.Progress {
+				now := time.Now()
+				if firstDataAt == nil {
+					firstDataAt = &now
+				}
+				lastProgressAt = &now
+				controller.progress()
+				if snap.FinishSeen && !lastSnapshot.FinishSeen {
+					controller.finish()
+				}
+				lastSnapshot = snap
+			}
+		}
 		if convErr != nil {
 			closeStreams(errclass.Redact(convErr.Message))
+			logDone("terminal_error", upstreamClosed)
 			return
 		}
 		if emitErr := m.emitAll(downID, events); emitErr != nil {
 			closeStreams(errclass.Redact(emitErr.Error()))
+			logDone("emit_error", upstreamClosed)
 			return
 		}
 		convDone = done
@@ -506,20 +568,65 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			flushed, flushErr := flusher.FlushWithError()
 			if flushErr != nil {
 				closeStreams(errclass.Redact(flushErr.Message))
+				logDone("truncated", true)
 				return
 			}
 			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
 				closeStreams(errclass.Redact(emitErr.Error()))
+				logDone("emit_error", true)
 				return
 			}
 		} else if flusher, ok := conv.(interface{ Flush() [][]byte }); ok {
 			flushed := flusher.Flush()
 			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
 				closeStreams(errclass.Redact(emitErr.Error()))
+				logDone("emit_error", true)
 				return
 			}
 		}
 	}
+	if !logged && finishCause == "" {
+		finishCause = "terminal"
+		if upstreamClosed {
+			finishCause = "eof"
+		}
+		logDone(finishCause, upstreamClosed)
+	}
+}
+
+func streamCauseError(cause string) string {
+	switch cause {
+	case "first_data":
+		return "stream first data timeout"
+	case "idle":
+		return "stream idle timeout"
+	case "total":
+		return "stream total timeout"
+	case "finish_grace":
+		return "stream terminal incomplete"
+	}
+	return "stream truncated"
+}
+
+func (m *Manager) logStreamFinished(route catalog.Route, sourceFormat, cause string, start time.Time, headersAt, firstDataAt, lastProgressAt *time.Time, total, chunks int64, snapshot shared.StreamSnapshot, eof bool) {
+	if m == nil || m.bridge == nil {
+		return
+	}
+	fields := map[string]any{"route": string(route), "source_format": sourceFormat, "cause": cause, "duration_ms": time.Since(start).Milliseconds(), "bytes": total, "chunks": chunks, "finish_seen": snapshot.FinishSeen, "done_seen": snapshot.DoneSeen, "eof": eof, "headers_ms": nil, "first_data_ms": nil, "last_progress_ms": nil}
+	if headersAt != nil {
+		fields["headers_ms"] = headersAt.Sub(start).Milliseconds()
+	}
+	if firstDataAt != nil {
+		fields["first_data_ms"] = firstDataAt.Sub(start).Milliseconds()
+	}
+	if lastProgressAt != nil {
+		fields["last_progress_ms"] = lastProgressAt.Sub(start).Milliseconds()
+	}
+	level := "warn"
+	if cause == "terminal" || cause == "eof" || cause == "finish_grace" {
+		level = "info"
+	}
+	_ = m.bridge.Log(level, "commandcode stream finished", fields)
 }
 
 // emitAll feeds converted events downstream in order. StreamEmit is

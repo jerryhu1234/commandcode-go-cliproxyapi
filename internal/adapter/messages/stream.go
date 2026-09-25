@@ -35,7 +35,12 @@ type StreamConverter struct {
 	outCount         int  // responses: next compacted output position; thinking blocks consume none (FR-005 omission)
 	emitted          bool // any client event emitted (Flush eligibility)
 	flushed          bool // one-shot guard for Flush
+	streamState      shared.StreamState
+	lastUsage        usageCounts
+	seenStarts       map[int]string
 }
+
+func (sc *StreamConverter) StreamSnapshot() shared.StreamSnapshot { return sc.streamState.Snapshot }
 
 // blockState tracks one open upstream content block by index.
 type blockState struct {
@@ -58,6 +63,7 @@ func NewStreamConverter(sourceFormat string) *StreamConverter {
 		sourceFormat: sourceFormat,
 		created:      time.Now().Unix(),
 		blocks:       map[int]*blockState{},
+		seenStarts:   map[int]string{},
 		msgIdx:       -1,
 	}
 }
@@ -80,9 +86,73 @@ func (sc *StreamConverter) Feed(chunk []byte) (events [][]byte, done bool, eErr 
 			return events, false, eErr
 		}
 		if d {
+			if _, vErr := sc.validateTools(); vErr != nil {
+				return events, false, vErr
+			}
+		}
+		sc.observeFrame(etype, data)
+		if d {
 			return events, true, nil
 		}
 	}
+}
+
+func (sc *StreamConverter) observeFrame(etype, data string) {
+	var ev sseEvent
+	_ = json.Unmarshal([]byte(data), &ev)
+	switch etype {
+	case "message_start":
+		if !sc.streamState.Snapshot.Started {
+			sc.streamState.Start()
+		}
+	case "content_block_start":
+		idx := int(ev.Index)
+		sig := ev.ContentBlock.Type + "\x00" + ev.ContentBlock.ID + "\x00" + ev.ContentBlock.Name
+		if sc.seenStarts[idx] != sig {
+			sc.seenStarts[idx] = sig
+			sc.streamState.Advance()
+		}
+	case "content_block_delta":
+		if ev.Delta.Text != "" || ev.Delta.PartialJSON != "" {
+			sc.streamState.Advance()
+		}
+	case "message_delta":
+		if strings.TrimSpace(ev.Delta.StopReason) != "" && !sc.streamState.Snapshot.FinishSeen {
+			sc.streamState.Finish()
+		}
+		if !sameUsage(ev.Usage, sc.lastUsage) {
+			sc.lastUsage = ev.Usage
+			sc.streamState.Advance()
+		}
+	case "message_stop":
+		if _, e := sc.validateTools(); e == nil {
+			sc.streamState.Done()
+			sc.streamState.Terminal("message_stop")
+		}
+	}
+}
+
+func (sc *StreamConverter) validateTools() (bool, *errclass.Error) {
+	for _, bs := range sc.blocks {
+		if bs.kind == "tool_use" {
+			raw := shared.DefaultArgs(bs.args.String())
+			var v any
+			if json.Unmarshal([]byte(raw), &v) != nil {
+				return false, errclass.Translation("Messages tool arguments were incomplete at stream completion")
+			}
+		}
+	}
+	return true, nil
+}
+
+func sameUsage(a, b usageCounts) bool {
+	return a.InputTokens == b.InputTokens && a.OutputTokens == b.OutputTokens && floatPtrEqual(a.CacheRead, b.CacheRead) && floatPtrEqual(a.CacheCreation, b.CacheCreation)
+}
+func floatPtrEqual(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // dispatch routes one complete SSE frame. Conversion targets parse the
@@ -367,6 +437,23 @@ func (sc *StreamConverter) Flush() [][]byte {
 		return nil
 	}
 }
+
+func (sc *StreamConverter) FinalizeStream() ([][]byte, *errclass.Error) {
+	if sc.streamState.Snapshot.TerminalSeen {
+		return nil, nil
+	}
+	if !sc.streamState.Snapshot.FinishSeen {
+		return nil, errclass.Translation("Messages stream ended before a terminal stop reason")
+	}
+	if _, e := sc.validateTools(); e != nil {
+		return nil, e
+	}
+	events := sc.Flush()
+	sc.streamState.Terminal("finish")
+	return events, nil
+}
+
+func (sc *StreamConverter) FlushWithError() ([][]byte, *errclass.Error) { return sc.FinalizeStream() }
 
 // outputItems materializes the Responses output array from observed
 // content blocks in upstream index order (FR-006) through the shared

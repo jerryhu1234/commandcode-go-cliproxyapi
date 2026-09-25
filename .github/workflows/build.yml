@@ -32,8 +32,8 @@ jobs:
         with:
           node-version: 22
 
-      - name: Test quota page authentication
-        run: node --test tests/quota_page_auth.test.js
+      - name: Test quota page
+        run: node --test tests/quota_page_auth.test.js tests/quota_page_refresh.test.js
 
       - name: Test
         run: go test ./...
@@ -106,7 +106,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.2.5-dev"
+            VERSION="0.2.6-dev.1"
           fi
           COMMIT="${GITHUB_SHA:0:12}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
@@ -166,7 +166,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.2.5-dev"
+            VERSION="0.2.6-dev.1"
           fi
           COMMIT="${GITHUB_SHA:0:12}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
@@ -236,7 +236,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.2.5-dev"
+            VERSION="0.2.6-dev.1"
           fi
           COMMIT="${GITHUB_SHA:0:12}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"

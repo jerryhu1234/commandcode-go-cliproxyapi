@@ -155,7 +155,7 @@ plugins:
 	infos := host.RegisteredPlugins()
 	require(len(infos) == 1, "registered plugins: %+v", infos)
 	info := infos[0]
-	require(info.Metadata.Version == "0.2.5" && info.SupportsOAuth && info.SupportsQuota && info.QuotaProvider == "commandcode", "metadata/capabilities: %+v", info)
+	require(info.Metadata.Version == "0.2.6-dev.1" && info.SupportsOAuth && info.SupportsQuota && info.QuotaProvider == "commandcode", "metadata/capabilities: %+v", info)
 
 	files, _ := filepath.Glob(filepath.Join(authDir, "commandcode-key-*.json"))
 	require(len(files) == 1, "auth materialization files: %v", files)
@@ -229,5 +229,5 @@ plugins:
 
 	host.ShutdownAll()
 	require(!host.PluginBusy(pluginID), "plugin remained loaded after shutdown")
-	fmt.Println("CPA_HOST_INTEGRATION_OK registered=1 version=0.2.5 canonical_auth=1 watcher=email+reconfigure+restart codex=preserved rows=unique models=1 nonstream=ok stream=ok native_quota=ok legacy_resource=ok legacy_api=ok reset=unsupported shutdown=ok")
+	fmt.Println("CPA_HOST_INTEGRATION_OK registered=1 version=0.2.6-dev.1 canonical_auth=1 watcher=email+reconfigure+restart codex=preserved rows=unique models=1 nonstream=ok stream=ok native_quota=ok legacy_resource=ok legacy_api=ok reset=unsupported shutdown=ok")
 }

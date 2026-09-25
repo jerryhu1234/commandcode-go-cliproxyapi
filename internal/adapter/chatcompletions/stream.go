@@ -57,7 +57,11 @@ type StreamConverter struct {
 	textClosed    bool
 	responseItems map[int]any
 	reasonOrdinal int
+	streamState   shared.StreamState
+	usageProgress string
 }
+
+func (sc *StreamConverter) StreamSnapshot() shared.StreamSnapshot { return sc.streamState.Snapshot }
 
 // streamTool accumulates one upstream tool_calls index; args collects
 // argument fragments so the terminal response.completed output carries the
@@ -120,7 +124,7 @@ func (sc *StreamConverter) Feed(chunk []byte) (events [][]byte, done bool, eErr 
 func (sc *StreamConverter) handleLine(line string) ([][]byte, *errclass.Error) {
 	switch sc.sourceFormat {
 	case "openai":
-		return sc.passthroughLine(line), nil
+		return sc.passthroughLine(line)
 	case "claude":
 		return sc.claudeLine(line)
 	case "openai-response":
@@ -187,22 +191,90 @@ func sseData(line string) (payload string, ok bool) {
 // under a vendor spelling is mirrored onto the standard reasoning_content
 // member so clients that only read that member still see thinking; every
 // other payload forwards byte-identical.
-func (sc *StreamConverter) passthroughLine(line string) [][]byte {
+func (sc *StreamConverter) passthroughLine(line string) ([][]byte, *errclass.Error) {
 	data, ok := sseData(line)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	if shared.IsSSEDone(data) {
+		if eErr := sc.validateAccumulatedTools(); eErr != nil {
+			return nil, eErr
+		}
 		sc.done = true
-		return nil
+		sc.streamState.Done()
+		sc.streamState.Terminal("done")
+		return nil, nil
 	}
 	if data == "" {
-		return nil
+		return nil, nil
+	}
+	var observed ccChunk
+	if json.Unmarshal([]byte(data), &observed) == nil {
+		if !sc.streamState.Snapshot.Started && len(observed.Choices) > 0 {
+			sc.streamState.Start()
+		}
+		if observed.Usage != nil && sc.usageChanged(observed.Usage) {
+			sc.streamState.Advance()
+		}
+		if len(observed.Choices) > 0 {
+			c := observed.Choices[0]
+			if c.Delta.Content != "" || len(c.Delta.ToolCalls) > 0 {
+				sc.streamState.Advance()
+			}
+			if _, ok := c.Delta.ReasoningText(); ok {
+				sc.streamState.Advance()
+			}
+			if c.FinishReason != "" && !sc.streamState.Snapshot.FinishSeen {
+				sc.streamState.Finish()
+			}
+			for _, tc := range c.Delta.ToolCalls {
+				t := sc.tools[tc.Index]
+				if t == nil {
+					t = &streamTool{id: tc.ID}
+					sc.tools[tc.Index] = t
+					sc.toolOrder = append(sc.toolOrder, tc.Index)
+				}
+				if tc.Function.Name != "" {
+					t.name += tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					t.args.WriteString(tc.Function.Arguments)
+				}
+			}
+		}
 	}
 	if fixed := shared.BackfillReasoningContent([]byte(data), "delta"); fixed != nil {
-		return [][]byte{fixed}
+		return [][]byte{fixed}, nil
 	}
-	return [][]byte{[]byte(data)}
+	return [][]byte{[]byte(data)}, nil
+}
+
+func (sc *StreamConverter) usageChanged(usage *ccUsage) bool {
+	if usage == nil {
+		return false
+	}
+	raw, _ := json.Marshal(usage)
+	next := string(raw)
+	if next == sc.usageProgress {
+		return false
+	}
+	sc.usageProgress = next
+	return true
+}
+
+func (sc *StreamConverter) validateAccumulatedTools() *errclass.Error {
+	for _, idx := range sc.toolOrder {
+		t := sc.tools[idx]
+		if t == nil {
+			continue
+		}
+		raw := shared.DefaultArgs(t.args.String())
+		var value any
+		if json.Unmarshal([]byte(raw), &value) != nil {
+			return errclass.Translation("tool call arguments were incomplete at stream completion")
+		}
+	}
+	return nil
 }
 
 // ---- upstream Chat Completions chunk shape ----
@@ -318,7 +390,12 @@ func (sc *StreamConverter) claudeLine(line string) ([][]byte, *errclass.Error) {
 		return nil, nil
 	}
 	if shared.IsSSEDone(data) {
+		if eErr := sc.validateAccumulatedTools(); eErr != nil {
+			return nil, eErr
+		}
 		sc.done = true
+		sc.streamState.Done()
+		sc.streamState.Terminal("message_stop")
 		events := sc.stopBlocks()
 		events = append(events, sc.claudeTerminal()...)
 		return append(events, sc.claudeEm.MessageStop()), nil
@@ -328,10 +405,16 @@ func (sc *StreamConverter) claudeLine(line string) ([][]byte, *errclass.Error) {
 		return nil, eErr
 	}
 	var events [][]byte
+	if !sc.streamState.Snapshot.Started && len(chunk.Choices) > 0 {
+		sc.streamState.Start()
+	}
 	if sc.heldFinish != "" {
 		// A post-finish chunk (typically the include_usage trailer)
 		// flushes the deferred terminal so it carries the final counts.
 		events = append(events, sc.claudeTerminal()...)
+	}
+	if chunk.Usage != nil && sc.usageChanged(chunk.Usage) {
+		sc.streamState.Advance()
 	}
 	if !sc.started && len(chunk.Choices) > 0 {
 		sc.started = true
@@ -346,6 +429,15 @@ func (sc *StreamConverter) claudeLine(line string) ([][]byte, *errclass.Error) {
 		return events, nil
 	}
 	choice := chunk.Choices[0]
+	if choice.Delta.Content != "" || len(choice.Delta.ToolCalls) > 0 {
+		sc.streamState.Advance()
+	}
+	if _, ok := choice.Delta.ReasoningText(); ok {
+		sc.streamState.Advance()
+	}
+	if choice.FinishReason != "" && !sc.streamState.Snapshot.FinishSeen {
+		sc.streamState.Finish()
+	}
 	if thinking, ok := choice.Delta.ReasoningText(); ok {
 		// Vendor thinking spellings become the leading thinking block. A
 		// reopen (thinking after text or tools) closes every open block
@@ -392,6 +484,7 @@ func (sc *StreamConverter) claudeLine(line string) ([][]byte, *errclass.Error) {
 				map[string]any{"id": t.id, "name": t.name, "input": map[string]any{}}))
 		}
 		if tc.Function.Arguments != "" {
+			t.args.WriteString(tc.Function.Arguments)
 			events = append(events, sc.claudeEm.ContentBlockDelta(t.blockIndex,
 				map[string]any{"type": "input_json_delta", "partial_json": tc.Function.Arguments}))
 		}
@@ -490,6 +583,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 			return events, terminalErr
 		}
 		sc.done = true
+		sc.streamState.Done()
 		return append(events, terminal...), nil
 	}
 	chunk, eErr := sc.decodeChunk(data)
@@ -497,6 +591,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		return nil, eErr
 	}
 	var events [][]byte
+	changed := false
 	if sc.heldFinish != "" {
 		// A post-finish chunk (typically the include_usage trailer)
 		// flushes the deferred terminal so it carries the final counts.
@@ -506,6 +601,9 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		}
 		events = append(events, terminal...)
 	}
+	if chunk.Usage != nil && sc.usageChanged(chunk.Usage) {
+		sc.streamState.Advance()
+	}
 	if !sc.started && len(chunk.Choices) > 0 {
 		sc.started = true
 		sc.id = chunk.ID
@@ -513,12 +611,15 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		// Lifecycle parity with the Responses protocol: announce the
 		// response before any deltas reference it (F18).
 		events = append(events, sc.responsesEm().Created(), sc.responsesEm().InProgress())
+		sc.streamState.Start()
+		changed = true
 	}
 	if len(chunk.Choices) == 0 {
 		return events, nil
 	}
 	choice := chunk.Choices[0]
 	if thinking, ok := choice.Delta.ReasoningText(); ok {
+		changed = true
 		events = append(events, sc.closeResponseText("completed")...)
 		if sc.thinkStopped {
 			sc.thinkStopped = false
@@ -538,6 +639,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		events = append(events, sc.responsesEm().ReasoningSummaryDelta(sc.thinkItemID, sc.thinkIndexIn, thinking))
 	}
 	if choice.Delta.Content != "" {
+		changed = true
 		events = append(events, sc.stopReasoning()...)
 		if sc.msgIndex < 0 || sc.textClosed {
 			sc.msgIndex = sc.nextIndex
@@ -558,6 +660,9 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		events = append(events, sc.responsesEm().TextDelta(sc.msgItemID, sc.msgIndex, choice.Delta.Content))
 	}
 	for _, tc := range choice.Delta.ToolCalls {
+		if tc.ID != "" || tc.Function.Name != "" || tc.Function.Arguments != "" {
+			changed = true
+		}
 		events = append(events, sc.stopReasoning()...)
 		events = append(events, sc.closeResponseText("completed")...)
 		t := sc.tools[tc.Index]
@@ -623,6 +728,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		}
 	}
 	if choice.FinishReason != "" && !sc.finished {
+		changed = true
 		for _, idx := range sc.toolOrder {
 			t := sc.tools[idx]
 			if !t.announced {
@@ -651,7 +757,13 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		}
 		sc.finished = true
 		sc.heldFinish = choice.FinishReason
+		sc.streamState.Finish()
 		events = append(events, sc.stopReasoning()...)
+	}
+	if changed && !sc.streamState.Snapshot.Started && sc.started {
+		sc.streamState.Advance()
+	} else if changed && choice.FinishReason == "" && sc.started {
+		sc.streamState.Advance()
 	}
 	return events, nil
 }
@@ -792,6 +904,7 @@ func (sc *StreamConverter) responsesTerminal(allowSyntheticFinish bool) ([][]byt
 		}
 	}
 	sc.terminalSent = true
+	sc.streamState.Terminal(status)
 	return append(terminalEvents, sc.responsesEm().Completed(status, usage, output)), nil
 }
 
@@ -799,11 +912,32 @@ func (sc *StreamConverter) responsesTerminal(allowSyntheticFinish bool) ([][]byt
 // without [DONE], preserving the same terminal validation as the DONE path.
 func (sc *StreamConverter) FlushWithError() ([][]byte, *errclass.Error) {
 	if sc.sourceFormat != "openai-response" {
-		return sc.Flush(), nil
+		return sc.FinalizeStream()
 	}
 	if sc.flushed {
 		return nil, nil
 	}
 	sc.flushed = true
 	return sc.responsesTerminal(true)
+}
+
+func (sc *StreamConverter) FinalizeStream() ([][]byte, *errclass.Error) {
+	if sc.sourceFormat == "openai-response" {
+		return sc.responsesTerminal(false)
+	}
+	if sc.sourceFormat == "openai" || sc.sourceFormat == "claude" {
+		if sc.streamState.Snapshot.TerminalSeen {
+			return nil, nil
+		}
+		if !sc.streamState.Snapshot.FinishSeen {
+			return nil, errclass.Translation("Chat Completions stream ended before finish_reason")
+		}
+		if eErr := sc.validateAccumulatedTools(); eErr != nil {
+			return nil, eErr
+		}
+		events := sc.Flush()
+		sc.streamState.Terminal("finish")
+		return events, nil
+	}
+	return nil, nil
 }

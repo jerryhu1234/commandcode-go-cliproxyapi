@@ -119,6 +119,10 @@ plugins:
           endpoint: "/v1/messages"        # required, must start with "/"
 
       request-timeout: "5m"
+      stream-first-data-timeout: "60s"
+      stream-idle-timeout: "3m"
+      stream-total-timeout: "30m"
+      stream-finish-grace: "15s"
       max-response-bytes: 67108864        # 64 MiB
       allow-http: false                   # http:// base-url for local testing
 ```
@@ -138,6 +142,10 @@ plugins:
 | `responses-compatibility` | `string` | `cpa` | `cpa` follows CPA v7.3.15 degradation rules; `strict` rejects unsupported/stateful Responses semantics before upstream. |
 | `route-overrides` | `map` | `{}` | `{ model: { protocol, endpoint } }` pins a model onto another upstream route. `endpoint` is required. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP timeout (also bounds account/quota calls to 30s). |
+| `stream-first-data-timeout` | `duration` | `60s` | Deadline for the first meaningful parsed stream progress, including stream-open time. |
+| `stream-idle-timeout` | `duration` | `3m` | Renewed only by meaningful parsed progress; ping/comments/duplicates do not renew it. |
+| `stream-total-timeout` | `duration` | `30m` | Absolute stream lifetime; never renewed. |
+| `stream-finish-grace` | `duration` | `15s` | Maximum wait after finish for usage/DONE before safe finalization or error. |
 | `max-response-bytes` | `int64` | `67108864` | Maximum non-streaming response body size. |
 | `allow-http` | `bool` | `false` | Permit `http://` upstreams for local testing. |
 
@@ -150,7 +158,7 @@ The `CommandCode Quota` page (Management Center → plugins) reads the account s
 | `GET {authority}/alpha/billing/subscriptions` | Plan id/status |
 | `GET {authority}/alpha/whoami?limits=1` | Account email for the card label |
 
-`{authority}` is derived from `base-url` by trimming its provider path (`/provider/v1`). Each card is refreshed manually and independently; the page never polls, and quota values never influence routing.
+`{authority}` is derived from `base-url` by trimming its provider path (`/provider/v1`). Refreshes are manual: use a card's refresh action or **Refresh all**. Both paths share one queue capped at two concurrent account requests, including first-time initialization for cards without email metadata and every request in a batch. Batch progress reports `done/total`, then exact succeeded/failed counts. A failed refresh preserves that card's cached values and timestamp. The page never polls, and quota values never influence routing.
 
 The legacy page must share Management Center's credential storage origin. It reads remembered credential formats `enc::v1::` and `enc::v2::`; when credentials are unavailable in the iframe's own storage, no quota request is sent. This is a storage requirement, not an explicit cross-origin access-control mechanism. Quota queries do not reset provider limits; the legacy page may synchronize account email metadata. Quota reset, OAuth login, and token counting remain unsupported.
 
@@ -175,6 +183,17 @@ plugin a hosted code interpreter, search service, file store, or computer tool.
 4. Compare the adjacent `*.provenance.json` version, commit, archive name, and SHA-256 with the selected release artifact.
 5. For a manual installation pinned with `store.version: "0.2.5"`, install the extracted library as `commandcode-go-cliproxyapi-v0.2.5.<platform extension>`; the store installer handles this naming automatically. Replace the old runtime while CPA is stopped, then restart CPA and verify the registered plugin reports version `0.2.5`. Existing auth JSON is retained; do not recreate credentials as part of the upgrade.
 6. If rollback is needed, stop CPA, remove the new file, restore the backed-up runtime from outside the scan directory, and restart.
+
+### v0.2.6 development stream controller
+
+The unreleased `0.2.6-dev.1` build separates stream timing from
+`request-timeout`. Meaningful protocol progress—not heartbeat traffic—renews
+idle time, while a 30-minute total bound remains absolute. Finish grace may wait
+for a final usage trailer, but an upstream disconnect without finish/terminal
+evidence is reported as truncated; the plugin does not invent a successful
+response. Stream completion diagnostics contain fixed causes and timing/count
+fields only, never request payloads, credentials, URLs, headers, account data,
+or raw upstream errors.
 
 ### Reasoning effort
 

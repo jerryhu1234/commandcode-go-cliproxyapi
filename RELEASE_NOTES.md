@@ -1,5 +1,36 @@
 # Release Notes
 
+## v0.2.6 — In development
+
+This version is not published. Development builds report `0.2.6-dev.1`; the
+existing v0.2.5 tag and its source remain unchanged.
+
+- Adds manual **Refresh all** to the quota page. Batch refresh and per-card
+  refresh share one queue capped at two concurrent requests; first-time cards
+  without email metadata use the same limit. Progress reports `done/total` and
+  completion reports exact succeeded/failed counts. Failed cards retain cached
+  quota values and their cached timestamp. The page does not poll.
+- The quota refresh behavior is covered by deterministic VM tests with fake
+  host/account calls; this is not a new full-Manager browser validation claim.
+
+- Adds independent stream deadlines: first meaningful data (60s), idle after
+  meaningful progress (3m), absolute total duration (30m), and finish grace
+  (15s). `request-timeout` no longer bounds streams; it continues to govern
+  non-stream requests and quota/account calls as before.
+- Only parsed protocol progress refreshes idle time. Comments, ping frames,
+  whitespace, partial bytes, duplicate start/item frames, and unchanged usage
+  do not keep a stream alive. The total deadline is never extended.
+- Finish grace waits briefly for usage/DONE. A complete finish can finalize
+  safely; malformed/incomplete tools fail. If grace expires before a usage
+  trailer, a valid terminal may necessarily contain the usage observed so far.
+- Clean EOF without finish/terminal evidence is a truncated-stream error. This
+  does not recover upstream disconnects or manufacture successful output.
+- Emits one secret-free `commandcode stream finished` record per started stream
+  with route/source, fixed cause, timing milestones, byte/chunk counts, terminal
+  evidence, and EOF status. Successful terminal/eof/finish-grace records are
+  info; all error/timeout causes are warn. This controller affects only plugin
+  streams and does not modify CPA itself.
+
 ## v0.2.5 — CPA v7.3.15 / Manager 1.13 compatibility and Responses fixes
 
 v0.2.5 depends on CLIProxyAPI SDK v7.3.6 and is integration-tested against the

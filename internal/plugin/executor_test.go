@@ -778,6 +778,29 @@ func TestExecuteStreamRoutedFromBothMethods(t *testing.T) {
 	})
 }
 
+func TestStreamStartFailuresLogWarnOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script streamScript
+		cause  string
+	}{{"network", streamScript{startErr: errors.New("connect sentinel")}, "start_error"}, {"http", streamScript{startStatus: 429, upstreamID: "up-http"}, "http_status"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, f := newStreamManager(t, tc.script)
+			resp, _ := m.HandleCall("executor.execute_stream", execStreamReqBody("glm-5.3", "openai", []byte(ccRequestBody), "down"))
+			if decodeEnv(t, resp).OK {
+				t.Fatal("expected failure")
+			}
+			level, cause := decodeFinishLog(t, f)
+			if level != "warn" || cause != tc.cause {
+				t.Fatalf("level=%s cause=%s", level, cause)
+			}
+			if strings.Contains(string(finishLogs(f)[0].payload), "sentinel") {
+				t.Fatal("raw error leaked")
+			}
+		})
+	}
+}
+
 func TestExecuteStreamForwardsUpstreamErrorBody(t *testing.T) {
 	const frame = `{"error":{"message":"tool parameters must be type object"}}`
 	m, f := newStreamManager(t, streamScript{
@@ -892,8 +915,8 @@ func TestExecuteStreamCleanCloseWithoutTerminalFrame(t *testing.T) {
 		t.Fatalf("upstream closes = %d", got)
 	}
 	downCloses := f.callsOf(pluginabi.MethodHostStreamClose)
-	if len(downCloses) != 1 || strings.Contains(string(downCloses[0].payload), `"error"`) {
-		t.Fatalf("downstream closes = %v", downCloses)
+	if len(downCloses) != 1 || !strings.Contains(string(downCloses[0].payload), `"error"`) {
+		t.Fatalf("truncated downstream must close with error = %v", downCloses)
 	}
 }
 
@@ -1143,8 +1166,8 @@ func TestExecuteStreamPartialLineDroppedOnCleanClose(t *testing.T) {
 	}
 	m.bridge.WaitForInFlight(5 * time.Second)
 	downCloses := f.callsOf(pluginabi.MethodHostStreamClose)
-	if len(downCloses) != 1 || strings.Contains(string(downCloses[0].payload), `"error"`) {
-		t.Fatalf("downstream must close cleanly: %v", downCloses)
+	if len(downCloses) != 1 || !strings.Contains(string(downCloses[0].payload), `"error"`) {
+		t.Fatalf("partial/truncated downstream must close with error: %v", downCloses)
 	}
 	if got := len(f.callsOf(pluginabi.MethodHostHTTPStreamClose)); got != 1 {
 		t.Fatalf("upstream closes = %d", got)
@@ -1210,7 +1233,7 @@ func TestExecuteStreamWatchdogClosesIdleUpstream(t *testing.T) {
 		}
 	})
 	if _, err := m.HandleCall("plugin.register",
-		lifecycleRequestBody(testValidYAML+"request-timeout: 50ms\n")); err != nil {
+		lifecycleRequestBody(testValidYAML+"stream-first-data-timeout: 150ms\nstream-idle-timeout: 300ms\nstream-total-timeout: 600ms\nstream-finish-grace: 100ms\n")); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	resp, err := m.HandleCall("executor.execute_stream",

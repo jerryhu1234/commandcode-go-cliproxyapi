@@ -3,6 +3,7 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"commandcode-go-cliproxyapi/internal/adapter/shared"
 	"commandcode-go-cliproxyapi/internal/errclass"
@@ -37,8 +38,12 @@ type StreamConverter struct {
 	// Shared function_call announce-or-replay decision table for both
 	// conversion targets; an instance converts to exactly one target,
 	// so nextIndex doubles as the tool block index allocator.
-	tracker *toolCallTracker
+	tracker     *toolCallTracker
+	streamState shared.StreamState
+	seenItems   map[string]bool
 }
+
+func (sc *StreamConverter) StreamSnapshot() shared.StreamSnapshot { return sc.streamState.Snapshot }
 
 // NewStreamConverter builds a converter for sourceFormat ("openai",
 // "claude", "openai-response"); unknown formats fail on first Feed with
@@ -54,6 +59,7 @@ func NewStreamConverter(sourceFormat string) *StreamConverter {
 		source:    sourceFormat,
 		id:        "commandcode",
 		textIndex: -1,
+		seenItems: map[string]bool{},
 	}
 	sc.tracker = newToolCallTracker(sc.allocIndex)
 	return sc
@@ -253,17 +259,67 @@ func (sc *StreamConverter) Feed(chunk []byte) (events [][]byte, done bool, eErr 
 			if dErr != nil {
 				return events, false, dErr
 			}
+			sc.observeFrame(eventType, payload)
 			done = done || d
 			continue
 		}
 		evs, d, dErr := sc.convertEvent(eventType, payload)
 		events = append(events, evs...)
 		if dErr != nil {
+			if eventType == "response.failed" || eventType == "error" {
+				sc.streamState.Terminal("failed")
+			}
 			return events, false, dErr
 		}
+		sc.observeFrame(eventType, payload)
 		done = done || d
 	}
 }
+
+func (sc *StreamConverter) observeFrame(eventType, payload string) {
+	switch eventType {
+	case "response.created":
+		if !sc.streamState.Snapshot.Started {
+			sc.streamState.Start()
+		}
+	case "response.output_text.delta", "response.function_call_arguments.delta":
+		if strings.Contains(payload, `"delta"`) {
+			sc.streamState.Advance()
+		}
+	case "response.output_item.added", "response.content_part.added":
+		var identity struct {
+			OutputIndex  int `json:"output_index"`
+			ContentIndex int `json:"content_index"`
+			Item         struct {
+				ID string `json:"id"`
+			} `json:"item"`
+			ItemID string `json:"item_id"`
+		}
+		_ = json.Unmarshal([]byte(payload), &identity)
+		key := eventType + fmt.Sprintf("\x00%d\x00%d\x00%s\x00%s", identity.OutputIndex, identity.ContentIndex, identity.Item.ID, identity.ItemID)
+		if !sc.seenItems[key] {
+			sc.seenItems[key] = true
+			sc.streamState.Advance()
+		}
+	case "response.completed":
+		sc.streamState.Done()
+		sc.streamState.Terminal("completed")
+	case "response.incomplete":
+		sc.streamState.Done()
+		sc.streamState.Terminal("incomplete")
+	case "response.failed", "error":
+		sc.streamState.Terminal("failed")
+	}
+}
+
+func (sc *StreamConverter) FinalizeStream() ([][]byte, *errclass.Error) {
+	if sc.streamState.Snapshot.TerminalSeen {
+		return nil, nil
+	}
+	return nil, errclass.Translation("Responses stream ended before a terminal response event")
+}
+
+func (sc *StreamConverter) FlushWithError() ([][]byte, *errclass.Error) { return sc.FinalizeStream() }
 
 // convertEvent routes one complete SSE frame to a conversion target:
 // handled event types decode into their typed structs and share the
