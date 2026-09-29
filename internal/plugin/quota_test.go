@@ -474,27 +474,49 @@ func TestQuotaPageIsStaticAndSecretFree(t *testing.T) {
 	}
 }
 
-func TestQuotaPageUsesManualSessionCache(t *testing.T) {
+func TestQuotaPageUsesPersistentQuotaCache(t *testing.T) {
 	page := resources.QuotaPage
 	for _, marker := range []string{
 		`const storageKey = "commandcode-go-cliproxyapi:quota"`,
-		"sessionStorage.getItem(storageKey)",
+		"const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000",
+		"let cacheStorage = \"local\"",
+		"let localCache = readCache(localStorage)",
+		"if (localCache !== null) cache = localCache",
+		"cache = readCache(sessionStorage) || Object.create(null)",
+		"localStorage.setItem(storageKey, JSON.stringify(cache))",
+		"if (cacheStorage === \"local\") localStorage.setItem(storageKey, JSON.stringify(cache))",
 		"sessionStorage.setItem(storageKey, JSON.stringify(cache))",
+		"if (cacheStorage === \"local\") { cacheStorage = \"session\"",
+		"function readCache(storage)",
+		"function validKeyID(keyID)",
+		"function cleanUsage(usage)",
 		"JSON.parse(stored)",
-		"typeof parsed === \"object\"",
+		"typeof parsed !== \"object\"",
 		"Array.isArray(parsed)",
-		"catch (_) {}",
+		"Object.create(null)",
 		"Object.entries(cache)",
 		"values.set(keyID, entry.usage)",
-		"cache[keyID] = {usage, fetched_at: timestamp, label: labels.get(keyID) || \"\"}",
+		"cache[keyID] = {usage: safeUsage, fetched_at: timestamp, label: labels.get(keyID) || \"\"}",
+		"if (!validKeyID(keyID)) return",
 		"delete cache[keyID]",
 		"new Set(cards.map(card => card.key_id))",
 		"cards.filter(card => !card.email)",
 		"toLocaleString",
+		"Stale · last refreshed ",
+		"Quota refresh failed",
 	} {
 		if !strings.Contains(page, marker) {
-			t.Fatalf("quota page missing session cache marker %q", marker)
+			t.Fatalf("quota page missing persistent cache marker %q", marker)
 		}
+	}
+	if strings.Contains(page, "sessionStorage.getItem(storageKey)") {
+		t.Fatal("quota page must not use sessionStorage as its primary cache")
+	}
+	if strings.Index(page, "readCache(localStorage)") > strings.Index(page, "readCache(sessionStorage)") {
+		t.Fatal("quota page must read localStorage before sessionStorage")
+	}
+	if strings.Contains(page, "cache[keyID] = {usage, fetched_at") || strings.Contains(page, "cache[keyID] = {usage: usage") {
+		t.Fatal("quota cache marker permits unvalidated usage storage")
 	}
 	for _, marker := range []string{
 		"setTimeout",
@@ -502,9 +524,6 @@ func TestQuotaPageUsesManualSessionCache(t *testing.T) {
 		"document.hidden",
 		"window.onfocus",
 		"window.addEventListener(\"focus\"",
-		"TTL",
-		"expiry",
-		"expiration",
 		"bulk refresh",
 	} {
 		if strings.Contains(page, marker) {
@@ -568,8 +587,8 @@ func TestQuotaPageUsesNativeQuotaStylesAndThemeBridge(t *testing.T) {
 	if five < 0 || weekly < five || month < weekly {
 		t.Fatalf("quota rows out of order: five=%d weekly=%d month=%d", five, weekly, month)
 	}
- if strings.Count(resources.QuotaPage, `document.createElement("button")`) != 1 || strings.Contains(resources.QuotaPage, `textContent = "Refresh card"`) || strings.Contains(resources.QuotaPage, "quota-button") || strings.Contains(resources.QuotaPage, "quota-refresh-small") {
-  t.Fatal("quota page does not have exactly one per-card refresh button path")
+	if strings.Count(resources.QuotaPage, `document.createElement("button")`) != 1 || strings.Contains(resources.QuotaPage, `textContent = "Refresh card"`) || strings.Contains(resources.QuotaPage, "quota-button") || strings.Contains(resources.QuotaPage, "quota-refresh-small") {
+		t.Fatal("quota page does not have exactly one per-card refresh button path")
 	}
 	for _, marker := range []string{"querySelectorAll('head link[rel=\"stylesheet\"], head style')", "cloneNode(true)", "dataset.cpaStyle"} {
 		if strings.Contains(resources.QuotaPage, marker) {

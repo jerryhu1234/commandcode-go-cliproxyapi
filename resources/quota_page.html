@@ -75,6 +75,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
 .quota-refresh:disabled { cursor: not-allowed; opacity: .6; }
 .quota-error { color: var(--error-color); }
 .quota-warning { color: var(--warning-color); }
+.quota-stale { color: var(--warning-color); }
 .quota-muted { color: var(--text-secondary); }
 .quota-error + .quota-help { margin-top: 6px; color: var(--text-secondary); }
 @media (max-width: 768px) {
@@ -118,6 +119,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   const app = document.getElementById("app");
   const endpoint = "/v0/management/plugins/commandcode-go-cliproxyapi/quota-usage";
   const storageKey = "commandcode-go-cliproxyapi:quota";
+  const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
   const values = new Map();
   const labels = new Map();
   const fetchedAt = new Map();
@@ -130,12 +132,46 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   let batchActive = false;
   let batchState = null;
   let pageAuthKey = "";
-  let cache = {};
-  try {
-    const stored = sessionStorage.getItem(storageKey);
-    const parsed = stored ? JSON.parse(stored) : {};
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) cache = parsed;
-  } catch (_) {}
+  let cache = Object.create(null);
+  let cacheStorage = "local";
+  function validKeyID(keyID) { return typeof keyID === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(keyID); }
+  function cleanQuotaPart(part) {
+    if (!part || typeof part !== "object" || Array.isArray(part)) return null;
+    const clean = {};
+    ["percent", "used", "cap"].forEach(name => { if (typeof part[name] === "number" && Number.isFinite(part[name])) clean[name] = part[name]; });
+    if (typeof part.status === "string" && part.status.length <= 40) clean.status = part.status;
+    if (typeof part.resets_at === "string" && part.resets_at.length <= 80) clean.resets_at = part.resets_at;
+    return Object.keys(clean).length ? clean : null;
+  }
+  function cleanUsage(usage) {
+    if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+    const clean = {};
+    ["five_hour", "weekly", "month"].forEach(name => { const part = cleanQuotaPart(usage[name]); if (part) clean[name] = part; });
+    if (typeof usage.credits_left === "number" && Number.isFinite(usage.credits_left)) clean.credits_left = usage.credits_left;
+    if (typeof usage.plan === "string" && usage.plan.length <= 40) clean.plan = usage.plan;
+    return clean.five_hour || clean.weekly || clean.month ? clean : null;
+  }
+  function readCache(storage) {
+    try {
+      const stored = storage.getItem(storageKey); const parsed = stored ? JSON.parse(stored) : {};
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return Object.create(null);
+      const result = Object.create(null);
+      Object.entries(parsed).forEach(([keyID, entry]) => {
+        if (!validKeyID(keyID) || !entry || typeof entry !== "object") return;
+        const usage = cleanUsage(entry.usage);
+        if (!usage || typeof entry.fetched_at !== "string" || !entry.fetched_at || Number.isNaN(Date.parse(entry.fetched_at))) return;
+        result[keyID] = {usage, fetched_at: entry.fetched_at, label: typeof entry.label === "string" ? entry.label.slice(0, 200) : ""};
+      });
+      return result;
+    } catch (_) { return null; }
+  }
+  let localCache = readCache(localStorage);
+  if (localCache !== null) cache = localCache;
+  else { cacheStorage = "session"; cache = readCache(sessionStorage) || Object.create(null); }
+  if (!Object.keys(cache).length && cacheStorage === "local") {
+    const legacy = readCache(sessionStorage);
+    if (legacy && Object.keys(legacy).length) { cache = legacy; try { localStorage.setItem(storageKey, JSON.stringify(cache)); } catch (_) { cacheStorage = "session"; } }
+  }
   Object.entries(cache).forEach(([keyID, entry]) => {
     if (!entry || typeof entry !== "object" || !entry.usage || typeof entry.usage !== "object") return;
     values.set(keyID, entry.usage);
@@ -143,17 +179,24 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
     if (typeof entry.fetched_at === "string") fetchedAt.set(keyID, entry.fetched_at);
   });
   function saveCache() {
-    try { sessionStorage.setItem(storageKey, JSON.stringify(cache)); } catch (_) {}
+    try {
+      if (cacheStorage === "local") localStorage.setItem(storageKey, JSON.stringify(cache));
+      else sessionStorage.setItem(storageKey, JSON.stringify(cache));
+    } catch (_) {
+      if (cacheStorage === "local") { cacheStorage = "session"; try { sessionStorage.setItem(storageKey, JSON.stringify(cache)); } catch (_) {} }
+    }
   }
   function applyUsage(keyID, usage, label) {
+    if (!validKeyID(keyID)) return;
+    const safeUsage = cleanUsage(usage); if (!safeUsage) return;
     const timestamp = new Date().toISOString();
-    values.set(keyID, usage);
+    values.set(keyID, safeUsage);
     if (label) labels.set(keyID, label);
     fetchedAt.set(keyID, timestamp);
-    cache[keyID] = {usage, fetched_at: timestamp, label: labels.get(keyID) || ""};
+    cache[keyID] = {usage: safeUsage, fetched_at: timestamp, label: labels.get(keyID) || ""};
     saveCache();
   }
-  function safeError(error) { return error && error.message ? error.message : "Refresh failed"; }
+  function safeError() { return "Quota refresh failed"; }
   function updateBatch(result) {
     if (!batchState) return;
     if (result.ok) batchState.success++; else batchState.failed++;
@@ -314,7 +357,13 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
         section.appendChild(row);
       }
       const updated = fetchedAt.get(card.key_id);
-      if (updated) { const timestamp = document.createElement("div"); timestamp.className = "quota-meta"; timestamp.textContent = "Updated " + new Date(updated).toLocaleString(); section.appendChild(timestamp); }
+      if (updated) {
+        const timestamp = document.createElement("div");
+        const stale = Date.now() - Date.parse(updated) > CACHE_MAX_AGE_MS;
+        timestamp.className = stale ? "quota-meta quota-stale" : "quota-meta";
+        timestamp.textContent = (stale ? "Stale · last refreshed " : "Last refreshed ") + new Date(updated).toLocaleString();
+        section.appendChild(timestamp);
+      }
       const actions = document.createElement("div"); actions.className = "quota-actions";
        const busy = inFlight.has(card.key_id) || queued.has(card.key_id);
        const button = document.createElement("button"); button.className = "quota-refresh"; button.textContent = busy ? (inFlight.has(card.key_id) ? "Refreshing..." : "Queued...") : "Refresh"; button.disabled = busy; button.setAttribute("aria-label", "Refresh " + card.label);
