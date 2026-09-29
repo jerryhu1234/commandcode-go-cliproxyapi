@@ -41,7 +41,7 @@ Without this plugin, using a CommandCode Go/GOAT/Pro/Max plan in CLIProxyAPI req
 ## Features
 
 - **Single Provider Namespace**: models appear as `commandcode/deepseek/deepseek-v4.1-flash`, `commandcode/z-ai/glm-5.3-flash`, … (prefix configurable, can be disabled for bare upstream ids).
-- **Multi-Protocol Client Translation**: OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses requests all become upstream chat-completions calls, and responses are converted back — including streaming.
+- **Multi-Protocol Client Translation**: OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses requests are translated to the selected upstream route and converted back — including streaming. Responses requests use the Chat compatibility route by default; an explicit model-level `protocol: responses` override uses native `/v1/responses` instead.
 - **Reasoning Preservation**: upstream `reasoning`, `reasoning_details[].text`, and `reasoning_content` are normalized across targets:
   - Claude clients get a leading `thinking` block with `thinking_delta` events;
   - Responses clients get a leading `reasoning` output item with `response.reasoning_summary_*` events;
@@ -111,12 +111,12 @@ plugins:
       # use "strict" to reject stateful/hosted semantics that cannot be preserved.
       responses-compatibility: "cpa"     # cpa | strict
 
-      # Per-model route pins; only needed when the upstream serves another
-      # endpoint (CommandCode itself serves OSS models on chat-completions)
-      route-overrides:
-        "claude-sonnet-5":
-          protocol: "messages"            # chat-completions | messages | responses
-          endpoint: "/v1/messages"        # required, must start with "/"
+       # Per-model route pins; explicit capability declaration (no probing).
+       # Native Responses bypasses responses-compatibility.
+       route-overrides:
+         "native-responses-model":
+           protocol: "responses"           # chat-completions | messages | responses
+           endpoint: "/v1/responses"       # required, must start with "/"
 
       request-timeout: "5m"
       stream-first-data-timeout: "60s"
@@ -140,7 +140,7 @@ plugins:
 | `catalog.stale-while-unavailable` | `bool` | `true` | Keep serving the last good snapshot when a refresh fails. |
 | `protocols.*` | `bool` | `true` | Route kill switches. A disabled protocol excludes its models with a diagnostic. |
 | `responses-compatibility` | `string` | `cpa` | `cpa` follows CPA v7.3.15 degradation rules; `strict` rejects unsupported/stateful Responses semantics before upstream. |
-| `route-overrides` | `map` | `{}` | `{ model: { protocol, endpoint } }` pins a model onto another upstream route. `endpoint` is required. |
+| `route-overrides` | `map` | `{}` | `{ model: { protocol, endpoint } }` explicitly pins a model onto another route; no capability probing. A `responses` override calls native `/v1/responses` and bypasses `responses-compatibility`; without it, Responses uses the Chat fallback. `endpoint` is required. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP timeout (also bounds account/quota calls to 30s). |
 | `stream-first-data-timeout` | `duration` | `60s` | Deadline for the first meaningful parsed stream progress, including stream-open time. |
 | `stream-idle-timeout` | `duration` | `3m` | Renewed only by meaningful parsed progress; ping/comments/duplicates do not renew it. |

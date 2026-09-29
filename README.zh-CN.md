@@ -41,7 +41,7 @@ CommandCode Go/GOAT/Pro/Max 通过它的 OpenAI 兼容入口访问：
 ## 功能
 
 - **单一 Provider 命名空间**：模型形如 `commandcode/deepseek/deepseek-v4.1-flash`、`commandcode/z-ai/glm-5.3-flash`（前缀可配置，也可关闭而直接使用上游裸 id）。
-- **多协议客户端翻译**：OpenAI Chat Completions、Anthropic Messages、OpenAI Responses 三种请求都会转成上游 chat-completions 调用，响应（含流式）再转回来。
+- **多协议客户端翻译**：OpenAI Chat Completions、Anthropic Messages、OpenAI Responses 三种请求会转到选定的上游路由，响应（含流式）再转回来。Responses 默认使用 Chat fallback；显式的模型级 `protocol: responses` 覆盖项才调用原生 `/v1/responses`。
 - **思考内容保真**：把上游的 `reasoning`、`reasoning_details[].text`、`reasoning_content` 归一化到各目标格式：
   - Claude 客户端：前置一个 `thinking` 块 + `thinking_delta` 事件；
   - Responses 客户端：前置一个 `reasoning` output item + `response.reasoning_summary_*` 事件；
@@ -113,12 +113,12 @@ plugins:
       # strict 会在上游调用前拒绝无法保真的有状态/托管语义。
       responses-compatibility: "cpa"     # cpa | strict
 
-      # 按模型钉路由；只有上游在别的端点提供该模型时才需要
-      # （CommandCode 自身的 OSS 模型都在 chat-completions 上）
-      route-overrides:
-        "claude-sonnet-5":
-          protocol: "messages"            # chat-completions | messages | responses
-          endpoint: "/v1/messages"        # 必填，必须以 "/" 开头
+       # 按模型显式声明能力（不会自动探测）；原生 Responses
+       # 不适用下面的 responses-compatibility 策略。
+       route-overrides:
+         "native-responses-model":
+           protocol: "responses"           # chat-completions | messages | responses
+           endpoint: "/v1/responses"       # 必填，必须以 "/" 开头
 
       request-timeout: "5m"
       stream-first-data-timeout: "60s"
@@ -142,7 +142,7 @@ plugins:
 | `catalog.stale-while-unavailable` | `bool` | `true` | 刷新失败时继续提供上一份有效目录。 |
 | `protocols.*` | `bool` | `true` | 路由总开关；关闭的协议会带着诊断信息排除其模型。 |
 | `responses-compatibility` | `string` | `cpa` | `cpa` 对齐 CPA v7.3.15 的降级规则；`strict` 在上游调用前拒绝不支持或有状态的 Responses 语义。 |
-| `route-overrides` | `map` | `{}` | `{ 模型: { protocol, endpoint } }`，把某个模型钉到别的上游路由；`endpoint` 必填。 |
+| `route-overrides` | `map` | `{}` | `{ 模型: { protocol, endpoint } }`，显式把模型固定到其他上游路由，不会自动探测能力。`responses` 覆盖项调用原生 `/v1/responses` 且不适用 `responses-compatibility`；未配置时 Responses 使用 Chat fallback。`endpoint` 必填。 |
 | `request-timeout` | `duration` | `5m` | 上游 HTTP 超时（配额/账号请求另按 30s 上限）。 |
 | `stream-first-data-timeout` | `duration` | `60s` | 从打开流开始等待首次有意义协议进展的上限。 |
 | `stream-idle-timeout` | `duration` | `3m` | 仅有意义进展续期；ping、注释和重复帧不续期。 |

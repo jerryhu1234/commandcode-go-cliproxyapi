@@ -18,6 +18,23 @@ that the plugin provides the skipped hosted service.
 | Hosted `code_interpreter`, `web_search`, `file_search`, `computer` | CPA Responses→Chat skips these declarations | Default `cpa` mode skips them; `strict` rejects. The plugin does not host them | Upstream-owned, not provided by the plugin |
 | Messages/custom symmetric conversion | CPA-dependent | P2 not implemented; do not assume symmetry | Not applicable |
 
+## Selecting the native Responses route
+
+The plugin does not probe model capabilities or infer routes from model names.
+Every catalog model uses Chat Completions by default. To select a native
+Responses upstream for one exact catalog ID, configure:
+
+```yaml
+route-overrides:
+  native-responses-model:
+    protocol: responses
+    endpoint: /v1/responses
+```
+
+The executor then calls `/v1/responses` and does not apply
+`responses-compatibility`; that policy is only for Responses translated
+through the Chat route. Without this override, Responses retains Chat fallback.
+
 ## Responses-to-Chat compatibility modes
 
 `responses-compatibility: cpa` is the default. It follows the observed CPA

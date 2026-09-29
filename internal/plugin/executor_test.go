@@ -503,7 +503,9 @@ func TestExecuteMessagesUpstreamStatusClassified(t *testing.T) {
 
 func TestExecuteResponsesRouteNativePassesThrough(t *testing.T) {
 	m, f := newExecManager(t)
-	env := mustExecute(t, m, "gpt-5.6-luna", "openai-response", []byte(`{"model":"x","input":"hi"}`))
+	// Stateful Responses fields are intentionally retained on the native route;
+	// responses-compatibility applies only to Responses translated to Chat.
+	env := mustExecute(t, m, "gpt-5.6-luna", "openai-response", []byte(`{"model":"x","input":"hi","store":true,"previous_response_id":"resp_prev"}`))
 	if !env.OK {
 		t.Fatalf("envelope = %+v", env.Error)
 	}
