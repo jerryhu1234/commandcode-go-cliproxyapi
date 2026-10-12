@@ -55,7 +55,7 @@ CommandCode Go/GOAT/Pro/Max 通过它的 OpenAI 兼容入口访问：
 
 ## 环境要求
 
-- **CLIProxyAPI**：v0.2.5 已用 `v7.3.15` 验证（插件 SDK 依赖仍为 v7.3.6）
+- **CLIProxyAPI**：v0.2.7 已用 `v7.3.15` 验证（插件 SDK 依赖仍为 v7.3.6）
 - **Management Center**：1.13.x
 - **Go**：1.26.7（`-buildmode=c-shared` 需要启用 CGO）
 
@@ -189,12 +189,12 @@ plugins:
 契约的兄弟插件(见 `ollama-cliproxyapi` 插件):id 取自管理插件列表,或经
 `predictor.peer-plugins` 显式固定;没有兄弟插件响应时退化为单类型视图。
 
-## 升级到 v0.2.5
+## 升级到 v0.2.7
 
-1. 固定 CPA v7.3.15、Management Center 1.13.x 和插件版本 0.2.5，然后停止 CPA。
+1. 固定 CPA v7.3.15、Management Center 1.13.x 和插件版本 0.2.7，然后停止 CPA。
 2. 把旧 `.so`/`.dll`/`.dylib` 备份到所有插件扫描目录之外；扫描目录内的旧副本仍可能被发现。
-3. 校验 checksum/provenance。手动安装且设置 `store.version: "0.2.5"` 时，将解压的库命名为 `commandcode-go-cliproxyapi-v0.2.5.<平台扩展名>`；商店安装会自动处理此命名。
-4. 重启并确认注册版本为 `0.2.5`。升级会保留现有 auth JSON，不要重建凭据。
+3. 校验 checksum/provenance。手动安装且设置 `store.version: "0.2.7"` 时，将解压的库命名为 `commandcode-go-cliproxyapi-v0.2.7.<平台扩展名>`；商店安装会自动处理此命名。
+4. 重启并确认注册版本为 `0.2.7`。升级会保留现有 auth JSON，不要重建凭据。
 5. 回滚时停止 CPA，删除新文件，从扫描目录外恢复旧文件并重启。
 
 默认 `responses-compatibility: cpa` 会像 CPA v7.3.15 一样跳过 Chat

@@ -53,7 +53,7 @@ Without this plugin, using a CommandCode Go/GOAT/Pro/Max plan in CLIProxyAPI req
 
 ## Requirements
 
-- **CLIProxyAPI**: `v7.3.15` is the validated host for v0.2.5 (plugin ABI 1, schema 6); the plugin SDK dependency remains v7.3.6
+- **CLIProxyAPI**: `v7.3.15` is the validated host for v0.2.7 (plugin ABI 1, schema 6); the plugin SDK dependency remains v7.3.6
 - **Management Center**: `1.13.x`
 - **Go Toolchain**: Go 1.26.7 (CGO enabled for `-buildmode=c-shared`)
 
@@ -175,9 +175,9 @@ The `CommandCode Usage Prediction` page (Management Center → plugins) serves `
 
 The page's 全部类型 (all types) tab additionally queries sibling plugins that implement the same `/prediction` contract (see the `ollama-cliproxyapi` plugin): ids come from the management plugin list, or from `predictor.peer-plugins` when pinned, and the page degrades to the single-type view when none answer.
 
-## Upgrade to v0.2.5
+## Upgrade to v0.2.7
 
-v0.2.5 targets the CPA v7.3.15 host and Management Center 1.13.x validation matrix. Pin the installed plugin version to `0.2.5`. See [the protocol capability matrix](docs/protocol-capabilities.md) for the exact custom tool, namespace, structured-output, and option-policy boundaries.
+v0.2.7 targets the CPA v7.3.15 host and Management Center 1.13.x validation matrix. Pin the installed plugin version to `0.2.7`. See [the protocol capability matrix](docs/protocol-capabilities.md) for the exact custom tool, namespace, structured-output, and option-policy boundaries.
 
 The Chat Completions route now preserves flat Responses custom tools such as
 `apply_patch` across request, streaming/non-streaming call, and subsequent
@@ -194,7 +194,7 @@ plugin a hosted code interpreter, search service, file store, or computer tool.
 2. Back up the existing plugin file outside every configured plugin scan directory. A backup left under `plugins/`, including an old versioned `.so`/`.dll`/`.dylib`, may still be discovered.
 3. Verify the archive checksum, extract it, and confirm the runtime filename is `commandcode-go-cliproxyapi.<platform extension>`.
 4. Compare the adjacent `*.provenance.json` version, commit, archive name, and SHA-256 with the selected release artifact.
-5. For a manual installation pinned with `store.version: "0.2.5"`, install the extracted library as `commandcode-go-cliproxyapi-v0.2.5.<platform extension>`; the store installer handles this naming automatically. Replace the old runtime while CPA is stopped, then restart CPA and verify the registered plugin reports version `0.2.5`. Existing auth JSON is retained; do not recreate credentials as part of the upgrade.
+5. For a manual installation pinned with `store.version: "0.2.7"`, install the extracted library as `commandcode-go-cliproxyapi-v0.2.7.<platform extension>`; the store installer handles this naming automatically. Replace the old runtime while CPA is stopped, then restart CPA and verify the registered plugin reports version `0.2.7`. Existing auth JSON is retained; do not recreate credentials as part of the upgrade.
 6. If rollback is needed, stop CPA, remove the new file, restore the backed-up runtime from outside the scan directory, and restart.
 
 ### v0.2.6 development stream controller

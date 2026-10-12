@@ -1,5 +1,31 @@
 # Release Notes
 
+## v0.2.7 — Usage prediction port (/prediction contract)
+
+- Ports the usage-prediction engine, prediction page, and cross-type tab from
+  the ollama-cliproxyapi plugin: `POST /v0/management/plugins/commandcode-go-cliproxyapi/prediction`
+  returns store-only snapshots (account cards, the `commandcode` fleet view,
+  optional deadline evaluation, and the peers list); `GET /v0/resource/.../prediction`
+  serves the page. Account reads never touch the account surface — sampling
+  runs on a separate budget (default 10m cadence, 8 calls/min, 7d history,
+  48h horizon).
+- Mapping: the monthly plan allowance is the Included window
+  (remaining / max(allowance, remaining), subscription period end as reset);
+  the 5-hour and weekly limits map to percent gates (exceeded reads 0,
+  capless gates are omitted rather than invented); purchased credits record
+  as the billing channel. The account surface exposes no hourly buckets, so
+  the burn profile is flat-rate. Plans outside the built-in table render
+  dark instead of showing a ratio without a denominator.
+- New `predictor.*` config keys (`enabled`, `sample-interval`,
+  `budget-per-minute`, `history`, `horizon`, `persistence`, `data-dir`,
+  `peer-plugins`); persistence flushes NDJSON to `data-dir` (default
+  `<home>/.cli-proxy-api/usage-predictor`, `off` = memory-only), restores on
+  restart, and surfaces degradation states on the page.
+- The prediction page cross-type tab aggregates sibling plugins implementing
+  the same `/prediction` contract (discovered from the management plugin
+  list, or pinned via `predictor.peer-plugins`), degrading to the
+  single-type view when none answer.
+
 ## v0.2.6 — In development
 
 This version is not published. Development builds report `0.2.6-dev.1`; the
