@@ -179,6 +179,15 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 	if req.Method == http.MethodGet && req.Path == "/v0/resource/plugins/"+pluginName+"/quota" {
 		return pluginapi.ManagementResponse{Headers: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, Body: []byte(resources.QuotaPage)}, nil
 	}
+	// Usage prediction surface (plan §6/§8, sibling port): the GET serves
+	// the page resource; the POST returns store-only snapshots (never an
+	// upstream call), optionally evaluating a deadline.
+	if req.Method == http.MethodGet && req.Path == "/v0/resource/plugins/"+pluginName+"/prediction" {
+		return pluginapi.ManagementResponse{Headers: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, Body: []byte(resources.PredictionPage)}, nil
+	}
+	if req.Method == http.MethodPost && req.Path == "/v0/management/plugins/"+pluginName+"/prediction" {
+		return m.handlePredictorManagement(req)
+	}
 	if req.Method != http.MethodPost || req.Path != "/v0/management/plugins/"+pluginName+"/quota-usage" {
 		return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Body: []byte(`{"error":"not found"}`)}, nil
 	}

@@ -17,6 +17,7 @@ import (
 	"commandcode-go-cliproxyapi/internal/catalog"
 	"commandcode-go-cliproxyapi/internal/config"
 	"commandcode-go-cliproxyapi/internal/errclass"
+	"commandcode-go-cliproxyapi/internal/predictor"
 )
 
 // ProviderID is the single provider key served by this plugin (FR-001).
@@ -51,6 +52,10 @@ type Manager struct {
 	mu  sync.RWMutex
 	cfg config.Config
 	mgr *catalog.Manager
+	// pred is the active usage-prediction engine (nil when disabled or
+	// stopped). Its goroutines join before shutdown's bridge drain — see
+	// predictor.go wiring (plan §7).
+	pred *predictor.Engine
 	// stop/done manage the one background refresh goroutine; both nil
 	// when no loop is running.
 	stop chan struct{}
@@ -255,12 +260,18 @@ func (m *Manager) registerManagement(request []byte) ([]byte, error) {
 		Routes: []struct {
 			Method string `json:"method"`
 			Path   string `json:"path"`
-		}{{Method: "POST", Path: "/plugins/" + pluginName + "/quota-usage"}},
+		}{
+			{Method: "POST", Path: "/plugins/" + pluginName + "/quota-usage"},
+			{Method: "POST", Path: "/plugins/" + pluginName + "/prediction"},
+		},
 		Resources: []struct {
 			Path        string `json:"path"`
 			Menu        string `json:"menu"`
 			Description string `json:"description"`
-		}{{Path: "/quota", Menu: "CommandCode Quota", Description: "View CommandCode quota windows."}},
+		}{
+			{Path: "/quota", Menu: "CommandCode Quota", Description: "View CommandCode quota windows."},
+			{Path: "/prediction", Menu: "CommandCode Usage Prediction", Description: "Project CommandCode credit exhaustion and fleet capacity."},
+		},
 	}), nil
 }
 
@@ -340,6 +351,19 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	m.mu.Unlock()
 
 	m.startRefreshLoop(cfg, mgr, interval, stop, done)
+
+	// Usage predictor (plan §7, sibling port): the engine swaps for the new
+	// config here — after the refresh loop settles so their starts
+	// interleave cleanly. The retired engine stops with a bounded join; its
+	// final flush runs once its loops have exited, before the swap returns.
+	pred := m.buildPredictor(cfg)
+	if old := m.swapPredictor(pred); old != nil {
+		old.Stop()
+		old.WaitStopped(predictorStopTimeout)
+	}
+	if pred != nil {
+		pred.Start()
+	}
 	return registrationEnvelope(), nil
 }
 
@@ -455,6 +479,10 @@ func (m *Manager) handleShutdown() ([]byte, error) {
 	if oldDone != nil {
 		<-oldDone
 	}
+	// Predictor engine: stop and JOIN before the bridge drain — its fetches
+	// hold host-callback in-flight counts and every goroutine must have
+	// exited (with a final flush) before the drain window starts.
+	m.stopPredictor()
 	if m.bridge != nil && !m.bridge.WaitForInFlight(shutdownDrainTimeout) {
 		// Non-Windows unload during this residual window can crash the
 		// host; the warn makes the stall visible without blocking forever.

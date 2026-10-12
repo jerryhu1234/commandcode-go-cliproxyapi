@@ -22,10 +22,12 @@ func TestManagementRegistration(t *testing.T) {
 		Resources []struct{ Path, Menu, Description string } `json:"resources"`
 	}
 	decodeResult(t, mustHandle(t, m, pluginabi.MethodManagementRegister, []byte(`{}`)), &got)
-	if len(got.Routes) != 1 || got.Routes[0].Method != http.MethodPost || got.Routes[0].Path != "/plugins/"+pluginName+"/quota-usage" {
+	if len(got.Routes) != 2 || got.Routes[0].Method != http.MethodPost || got.Routes[0].Path != "/plugins/"+pluginName+"/quota-usage" ||
+		got.Routes[1].Path != "/plugins/"+pluginName+"/prediction" {
 		t.Fatalf("routes = %+v", got.Routes)
 	}
-	if len(got.Resources) != 1 || got.Resources[0].Path != "/quota" || got.Resources[0].Menu != "CommandCode Quota" {
+	if len(got.Resources) != 2 || got.Resources[0].Path != "/quota" || got.Resources[0].Menu != "CommandCode Quota" ||
+		got.Resources[1].Path != "/prediction" || got.Resources[1].Menu != "CommandCode Usage Prediction" {
 		t.Fatalf("resources = %+v", got.Resources)
 	}
 	var registration registrationResult

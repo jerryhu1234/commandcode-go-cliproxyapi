@@ -148,6 +148,14 @@ plugins:
 | `stream-finish-grace` | `duration` | `15s` | Maximum wait after finish for usage/DONE before safe finalization or error. |
 | `max-response-bytes` | `int64` | `67108864` | Maximum non-streaming response body size. |
 | `allow-http` | `bool` | `false` | Permit `http://` upstreams for local testing. |
+| `predictor.enabled` | `bool` | `true` | Usage-prediction sampler behind the prediction page. |
+| `predictor.sample-interval` | `duration` | `10m` | Sampling cadence (minimum `2m`). |
+| `predictor.budget-per-minute` | `int` | `8` | Global account-API call budget per minute (1–10). |
+| `predictor.history` | `duration` | `7d` | Retained sample series span (minimum `24h`). |
+| `predictor.horizon` | `duration` | `48h` | Fleet projection span (minimum `1h`, not beyond `history`). |
+| `predictor.persistence` | `bool` | `true` | Flush samples to `data-dir` NDJSON and restore on restart. |
+| `predictor.data-dir` | `string` | *auto* | `""` resolves `<home>/.cli-proxy-api/usage-predictor`; `off` = memory-only; else explicit path. |
+| `predictor.peer-plugins` | `[]string` | `[]` | Sibling plugin ids whose `/prediction` endpoints the page may aggregate (cross-type tab fallback list). |
 
 ### Quota page
 The `CommandCode Quota` page (Management Center → plugins) reads the account surface on the same authority as `base-url`:
@@ -161,6 +169,11 @@ The `CommandCode Quota` page (Management Center → plugins) reads the account s
 `{authority}` is derived from `base-url` by trimming its provider path (`/provider/v1`). Refreshes are manual: use a card's refresh action or **Refresh all**. Both paths share one queue capped at two concurrent account requests, including first-time initialization for cards without email metadata and every request in a batch. Batch progress reports `done/total`, then exact succeeded/failed counts. A failed refresh preserves that card's cached values and timestamp. The page never polls, and quota values never influence routing.
 
 The legacy page must share Management Center's credential storage origin. It reads remembered credential formats `enc::v1::` and `enc::v2::`; when credentials are unavailable in the iframe's own storage, no quota request is sent. This is a storage requirement, not an explicit cross-origin access-control mechanism. Quota queries do not reset provider limits; the legacy page may synchronize account email metadata. Quota reset, OAuth login, and token counting remain unsupported.
+
+### Usage prediction
+The `CommandCode Usage Prediction` page (Management Center → plugins) serves `POST /v0/management/plugins/commandcode-go-cliproxyapi/prediction` with store-only snapshots (reads never touch the account surface). The engine samples the same account endpoints as the quota page (`/alpha/billing/credits`, plus `/alpha/billing/subscriptions` for the allowance and period end) every `sample-interval`, records the monthly plan window, the 5-hour/weekly percent gates and purchased credits into a local NDJSON series under `predictor.data-dir`, and projects exhaustion per credential, per window, and for the `commandcode` fleet. Accounts whose plan is outside the built-in table render dark rather than invent a denominator. An explicit `deadline` body evaluates availability at that instant, and `refresh: true` schedules one in-budget re-sample.
+
+The page's 全部类型 (all types) tab additionally queries sibling plugins that implement the same `/prediction` contract (see the `ollama-cliproxyapi` plugin): ids come from the management plugin list, or from `predictor.peer-plugins` when pinned, and the page degrades to the single-type view when none answer.
 
 ## Upgrade to v0.2.5
 

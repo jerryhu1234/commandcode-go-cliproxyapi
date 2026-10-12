@@ -149,7 +149,15 @@ plugins:
 | `stream-total-timeout` | `duration` | `30m` | 流的绝对总时长，不续期。 |
 | `stream-finish-grace` | `duration` | `15s` | finish 后等待 usage/DONE 并安全结束的最长时间。 |
 | `max-response-bytes` | `int64` | `67108864` | 非流式响应体上限。 |
-| `allow-http` | `bool` | `false` | 允许 `http://` 上游，仅供本地测试。 |
+| `allow-http` | `bool` | `false` | 允许 `http://` 上游,仅供本地测试。 |
+| `predictor.enabled` | `bool` | `true` | 用量预测采样器(预测页的数据引擎)。 |
+| `predictor.sample-interval` | `duration` | `10m` | 采样节奏(最小 `2m`)。 |
+| `predictor.budget-per-minute` | `int` | `8` | 每分钟账号接口全局调用预算(1–10)。 |
+| `predictor.history` | `duration` | `7d` | 序列保留时长(最小 `24h`)。 |
+| `predictor.horizon` | `duration` | `48h` | 舰队投影跨度(最小 `1h`,不得超过 `history`)。 |
+| `predictor.persistence` | `bool` | `true` | 采样落盘到 `data-dir` 的 NDJSON 并在重启时恢复。 |
+| `predictor.data-dir` | `string` | *自动* | `""` 解析为 `<home>/.cli-proxy-api/usage-predictor`;`off` = 仅内存;其余为显式路径。 |
+| `predictor.peer-plugins` | `[]string` | `[]` | 兄弟插件 id 列表,页签聚合其 `/prediction` 端点(跨类型页签的显式备选)。 |
 
 ### 配额页面
 
@@ -167,6 +175,19 @@ plugins:
 `enc::v2::` 的本地认证存储；iframe 自身存储中没有可用凭据时不会发送请求。这不是独立的跨源访问控制机制。Manager 的
 “凭证配额列表”尚未为本插件专门适配，插件提供的是原生只读 quota 和旧版
 插件配额页。
+
+### 用量预测
+管理后台 → 插件 里的 `CommandCode Usage Prediction` 页面由
+`POST /v0/management/plugins/commandcode-go-cliproxyapi/prediction` 提供数据,读数只来自本地采样存储(页面读取从不打账号接口)。引擎按
+`sample-interval` 以配额页同款账号接口(`​/alpha/billing/credits`,以及
+`/alpha/billing/subscriptions` 取套餐额度和周期末)采样,把月度计划窗口、5
+小时/每周百分比门与已购额度记录到 `predictor.data-dir` 下的 NDJSON
+序列,并按凭据、按窗口、按 `commandcode` 舰队三层投影耗尽时间。套餐不在内表中的账号保持暗显,不虚构分子。请求体可带显式 `deadline`
+评估该时刻可用性,也可带 `refresh: true` 触发一次预算内的补充采样。
+
+页面的 全部类型 页签还会查询实现了同一 `/prediction`
+契约的兄弟插件(见 `ollama-cliproxyapi` 插件):id 取自管理插件列表,或经
+`predictor.peer-plugins` 显式固定;没有兄弟插件响应时退化为单类型视图。
 
 ## 升级到 v0.2.5
 
