@@ -1,5 +1,26 @@
 # Release Notes
 
+## v0.2.8 — Prediction readability and purchased-credits fixes
+
+Presentation and verdict fixes shared with the ollama plugin's predictor
+package; no sampling cadence or estimation changes.
+
+- Prediction page windows now speak the quota page's language: "Monthly
+  credits / 5-hour window / Weekly window / Purchased credits" (zh:
+  月度额度 / 5 小时窗口 / 每周窗口 / 已购积分). Every window also annotates
+  its headline value with a "left"/"剩余" suffix — the numbers are
+  remaining values, the complement of the used-percentage shown on the
+  quota page, and the raw "95%" read as the opposite until now.
+- An empty purchased balance — the steady state for accounts that never
+  bought packs — no longer renders as "exhausted · waiting for reset".
+  Purchased credits are money without a reset cycle, so the row reads
+  neutral ("none"/未使用).
+- The account verdict follows the vendor's combined pool: an empty monthly
+  window no longer marks the account exhausted while purchased credits
+  still hold balance — the account keeps burning purchased credits until
+  both sides are empty. The 5-hour and weekly percent gates keep their
+  existing precedence.
+
 ## v0.2.7 — Usage prediction port (/prediction contract)
 
 - Ports the usage-prediction engine, prediction page, and cross-type tab from
