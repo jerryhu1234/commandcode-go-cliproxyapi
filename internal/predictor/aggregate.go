@@ -242,6 +242,10 @@ func BuildFleetView(store *Store, keyIDs []string, opts FleetOptions, deadline *
 			eta, _, exhausts := walkEta(w.remaining, w.rate, nil, opts.Now, w.resets, etaWalkMaxHour)
 			if exhausts && eta > 0 && eta < minTime {
 				minTime = eta
+				view.FirstDepletionKeyID = in.keyID
+				view.FirstDepletionWindow = name
+			} else if exhausts && eta > 0 && eta == minTime && view.FirstDepletionKeyID == in.keyID && name < view.FirstDepletionWindow {
+				view.FirstDepletionWindow = name
 			}
 		}
 		// Projection walk (flat conservative rates with reset bumps, plan §5).

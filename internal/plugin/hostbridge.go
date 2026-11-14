@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // RawCaller performs one host callback round-trip: method name plus JSON
@@ -436,10 +436,20 @@ func (b *HostBridge) StreamEmit(downstreamStreamID string, payload []byte) error
 // redacted error label. Bounded by emitTimeout like StreamEmit: on a wedged
 // downstream consumer the close itself is what must not block.
 func (b *HostBridge) StreamCloseDownstream(downstreamStreamID string, errMsg string) error {
+	return b.StreamCloseDownstreamDetail(downstreamStreamID, errMsg, nil)
+}
+
+// StreamCloseDownstreamDetail is StreamCloseDownstream with an optional
+// structured error_detail (pluginabi.Error): the host's stream bridge gives
+// it precedence over the plain error string, so the client sees the
+// classified HTTP status and retry guidance instead of the host's
+// status-less default for message-only closes.
+func (b *HostBridge) StreamCloseDownstreamDetail(downstreamStreamID, errMsg string, detail *pluginabi.Error) error {
 	req := struct {
-		StreamID string `json:"stream_id"`
-		Error    string `json:"error,omitempty"`
-	}{downstreamStreamID, errMsg}
+		StreamID    string           `json:"stream_id"`
+		Error       string           `json:"error,omitempty"`
+		ErrorDetail *pluginabi.Error `json:"error_detail,omitempty"`
+	}{downstreamStreamID, errMsg, detail}
 	ctx, cancel := context.WithTimeout(context.Background(), emitTimeout)
 	defer cancel()
 	_, err := b.invoke(ctx, pluginabi.MethodHostStreamClose, req, "host stream close")

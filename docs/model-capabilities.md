@@ -1,23 +1,24 @@
-# Model capabilities (reasoning effort)
+# Model capabilities (reasoning effort and endpoint support)
 
-CommandCode **does not expose a capability API**. This file records the only
-authoritative per-model capability data that exists today, what was probed to
-establish that, and how the plugin behaves because of it.
+CommandCode's provider model catalog exposes `supported_endpoints`, which the
+plugin uses for endpoint routing. This file concerns the separate question of
+per-model reasoning-effort levels, which the provider catalog does not expose.
+It records the available reasoning evidence and how the plugin behaves.
 
-## There is no capability endpoint
+## There is no reasoning-effort capability endpoint
 
 Evidence gathered 2026-09-17 against `api.commandcode.ai`:
 
 | Probe | Result |
 |---|---|
-| `GET https://api.commandcode.ai/provider/v1/models` (no auth needed) | 69 models, each with exactly `id`, `object`, `created`, `owned_by`, `name`, `context_length` — no capability, thinking or effort field |
-| `/alpha/*` route inventory from the vendor's own CLI bundle and web bundle | `billing/credits`, `billing/subscriptions`, `usage/summary`, `whoami`, `agent/generate`, `generate`, `learn`, `namespaces`, `sandbox/*`, `share/*`, `taste/*`, `web-fetch`, `web-search`, `fingerprint/record`, `lifecycle-events`, `devrel-thread/*`, `consent/set`, `conversions/track` — **no models/capabilities route** |
+| `GET https://api.commandcode.ai/provider/v1/models` (no auth needed) | The catalog includes `supported_endpoints`; it does not include per-model reasoning-effort levels or a `thinking` declaration. The 2026-09-17 probe predates the documented endpoint field. |
+| `/alpha/*` route inventory from the vendor's own CLI bundle and web bundle | `billing/credits`, `billing/subscriptions`, `usage/summary`, `whoami`, `agent/generate`, `generate`, `learn`, `namespaces`, `sandbox/*`, `share/*`, `taste/*`, `web-fetch`, `web-search`, `fingerprint/record`, `lifecycle-events`, `devrel-thread/*`, `consent/set`, `conversions/track` — no reasoning-effort capability route |
 | Vendor CLI (`command-code` v1.54.2, `dist/cli.mjs`) | `getSupportedEfforts(model)` reads a static `new Map([...])` of 40 models; a model outside it yields `null` → the CLI reports "Reasoning effort not supported for X" and sends no effort field |
 | Vendor web app (`commandcode.ai`, `assets/constants-*.js`) | ships a static model registry with `reasoning: true` and `reasoningEfforts: [...]` per model — the effort selector in the UI reads that bundled table, not an API |
 
-So the vendor's own clients hardcode this data; nothing in this repository can
-fetch it, and a plugin has to embed it (or forward the client's request
-verbatim) if it wants per-model behaviour.
+So the vendor's own clients hardcode reasoning-effort data; endpoint support is
+separately declared in the provider model catalog. A plugin would have to embed
+the effort table (or forward client controls) for per-model effort validation.
 
 ## What the upstream actually enforces
 

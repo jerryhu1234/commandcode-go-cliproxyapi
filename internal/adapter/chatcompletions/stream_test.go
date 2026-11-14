@@ -523,7 +523,7 @@ func TestStreamConverterResponses(t *testing.T) {
 	for i, want := range []string{`{"j":`, `2}`} {
 		e := evs[i]
 		if e.Name != "response.function_call_arguments.delta" ||
-			e.Data["item_id"] != "c1" || e.Data["output_index"] != float64(1) || e.Data["delta"] != want {
+			e.Data["item_id"] != "fc_c1" || e.Data["output_index"] != float64(1) || e.Data["delta"] != want {
 			t.Fatalf("argument delta %d wrong: %v", i, e)
 		}
 	}
@@ -1046,11 +1046,30 @@ func TestStreamResponsesCompletedOutputFunctionCall(t *testing.T) {
 		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
 		`data: [DONE]`)
 	var completed map[string]any
+	var sawArgsDone, sawItemDone bool
 	for _, e := range evs {
 		t.Logf("EVENT %s", e)
+		if e.Name == "response.function_call_arguments.done" {
+			if e.Data["item_id"] != "fc_cc" || e.Data["arguments"] != `{"j":1,"k":2}` {
+				t.Fatalf("args done wrong: %v", e.Data)
+			}
+			sawArgsDone = true
+		}
+		if e.Name == "response.output_item.done" && e.Data["item"].(map[string]any)["type"] == "function_call" {
+			if e.Data["item"].(map[string]any)["id"] != "fc_cc" {
+				t.Fatalf("item done wrong: %v", e.Data)
+			}
+			sawItemDone = true
+		}
+		if e.Name == "response.completed" && (sawArgsDone == false || sawItemDone == false) {
+			t.Fatalf("completed must come after args.done and item.done: %v", evs)
+		}
 		if e.Name == "response.completed" {
 			completed = e.Data["response"].(map[string]any)
 		}
+	}
+	if !sawArgsDone || !sawItemDone {
+		t.Fatalf("missing closing events: argsDone=%t itemDone=%t", sawArgsDone, sawItemDone)
 	}
 	if completed == nil {
 		t.Fatal("missing response.completed")
@@ -1060,12 +1079,12 @@ func TestStreamResponsesCompletedOutputFunctionCall(t *testing.T) {
 		t.Fatalf("output = %v", completed["output"])
 	}
 	item := output[0].(map[string]any)
-	// F-R5 pin: function_call items carry call_id only — no "id" key.
-	if item["type"] != "function_call" || item["call_id"] != "cc" || item["name"] != "f" {
+	// Ported upstream v0.1.3 convention: function_call items carry an
+	// fc_-prefixed id alongside the retained call_id, so clients that only
+	// keep fc_ ids can bind streamed deltas and done events to the final
+	// output item.
+	if item["type"] != "function_call" || item["call_id"] != "cc" || item["name"] != "f" || item["id"] != "fc_cc" {
 		t.Fatalf("function_call item wrong: %v", item)
-	}
-	if _, has := item["id"]; has {
-		t.Fatalf("function_call must not carry an id key: %v", item)
 	}
 	if item["arguments"] != `{"j":1,"k":2}` {
 		t.Fatalf("accumulated arguments wrong: %v", item["arguments"])

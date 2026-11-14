@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/config"
 	"commandcode-go-cliproxyapi/resources"
@@ -109,18 +109,6 @@ type accountSubscription struct {
 		Status           string `json:"status"`
 		CurrentPeriodEnd string `json:"currentPeriodEnd"`
 	} `json:"data"`
-}
-
-type accountWhoami struct {
-	Success bool `json:"success"`
-	User    struct {
-		Name     string `json:"name"`
-		Email    string `json:"email"`
-		UserName string `json:"userName"`
-	} `json:"user"`
-	Org *struct {
-		Login string `json:"login"`
-	} `json:"org"`
 }
 
 // planAllowances is the vendor's own plan table (CommandCode CLI: planId →
@@ -354,14 +342,9 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 		usage.Month.ResetsAt = periodEndRFC3339(periodEnd)
 	}
 	if raw, errWho := get(accountWhoamiPath); errWho == nil {
-		var who accountWhoami
-		if json.Unmarshal(raw, &who) == nil {
-			email = strings.TrimSpace(who.User.Email)
-			label = email
-			if who.Org != nil && strings.TrimSpace(who.Org.Login) != "" {
-				label = strings.TrimSpace(who.Org.Login) + " (" + who.User.Email + ")"
-			}
-		}
+		identity := accountIdentityFromWhoami(raw)
+		email = identity.Email
+		label = identity.Label()
 	}
 	return usage, label, email, nil
 }

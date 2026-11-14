@@ -46,6 +46,7 @@ func (sc *StreamConverter) StreamSnapshot() shared.StreamSnapshot { return sc.st
 type blockState struct {
 	kind    string
 	id      string
+	itemID  string // fc_-prefixed Responses item id shared by deltas and done events
 	name    string
 	ordinal int             // compact tool_calls index for openai chunks
 	outIdx  int             // responses: compacted output_index assigned at block start
@@ -100,6 +101,15 @@ func (sc *StreamConverter) Feed(chunk []byte) (events [][]byte, done bool, eErr 
 func (sc *StreamConverter) observeFrame(etype, data string) {
 	var ev sseEvent
 	_ = json.Unmarshal([]byte(data), &ev)
+	// The framer returns etype="" for data-only frames; dispatch resolves the
+	// payload type into a local variable, and observation must resolve it
+	// too — otherwise a fully valid data-only stream converts fine but never
+	// marks Started/FinishSeen/TerminalSeen (Progress frozen at 0 makes the
+	// pump's first-data timer kill the healthy stream, and FinalizeStream
+	// contradicts Feed's done=true).
+	if etype == "" {
+		etype = ev.Type
+	}
 	switch etype {
 	case "message_start":
 		if !sc.streamState.Snapshot.Started {
@@ -132,12 +142,39 @@ func (sc *StreamConverter) observeFrame(etype, data string) {
 	}
 }
 
+// dumpBadTools is TEMP DIAGNOSTIC (remove after investigation): gated by
+// the plugin config (debug-tool-args-dump) and appends to shared's dump
+// file, so an incomplete-argument terminal failure can be attributed to
+// the upstream payload. stop reports the stop_reason when known.
+func dumpBadTools(site, stop string, sc *StreamConverter) {
+	if !shared.ToolArgsDumpEnabled() {
+		return
+	}
+	const maxSample = 800
+	for _, bs := range sc.blocks {
+		if bs.kind != "tool_use" {
+			continue
+		}
+		args := bs.args.String()
+		head, tail := "", ""
+		if len(args) > maxSample {
+			head, tail = args[:maxSample], args[len(args)-maxSample:]
+		} else {
+			head = args
+		}
+		shared.AppendToolArgsDump(fmt.Sprintf("CCDBG msg-tool site=%s finish=%q idx=%d id=%q name=%q args_len=%d head=%q tail=%q\n",
+			site, stop, bs.ordinal, bs.id, bs.name, len(args), head, tail))
+	}
+}
+
 func (sc *StreamConverter) validateTools() (bool, *errclass.Error) {
 	for _, bs := range sc.blocks {
 		if bs.kind == "tool_use" {
 			raw := shared.DefaultArgs(bs.args.String())
 			var v any
 			if json.Unmarshal([]byte(raw), &v) != nil {
+				// TEMP DIAGNOSTIC: identify the offending accumulated args.
+				dumpBadTools("msg_done", sc.stopReason, sc)
 				return false, errclass.Translation("Messages tool arguments were incomplete at stream completion")
 			}
 		}
@@ -300,9 +337,15 @@ func (sc *StreamConverter) dispatchOpenAI(etype string, ev *sseEvent, events *[]
 		sc.captureCache(ev.Usage)
 		// Observed tool calls outrank the status-derived reason: a
 		// terminal max_tokens cannot downgrade tool_calls to length.
-		sc.emitChunk(events, map[string]any{},
-			shared.TerminalReason(sc.toolsSeen, "tool_calls",
-				shared.ClaudeStopToFinish(ev.Delta.StopReason)), true)
+		// The finish chunk waits for an actual stop_reason: usage-only
+		// message_delta frames exist, and emitting the terminal frame on
+		// them closes the stream with a premature finish_reason while the
+		// real stop (or message_stop) is still to come.
+		if strings.TrimSpace(ev.Delta.StopReason) != "" {
+			sc.emitChunk(events, map[string]any{},
+				shared.TerminalReason(sc.toolsSeen, "tool_calls",
+					shared.ClaudeStopToFinish(ev.Delta.StopReason)), true)
+		}
 	case "message_stop":
 		return true, nil
 	case "error":
@@ -347,8 +390,11 @@ func (sc *StreamConverter) dispatchResponses(etype string, ev *sseEvent, events 
 			sc.toolsSeen = true
 			bs.outIdx = sc.outCount
 			sc.outCount++
+			bs.itemID = shared.FunctionCallItemID(bs.id)
+			// The fc_ item id is what clients use to bind the later delta
+			// and done events (upstream v0.1.3 parity).
 			*events = append(*events, sc.responsesEm().ItemAdded(bs.outIdx, map[string]any{
-				"type": "function_call", "call_id": bs.id, "name": bs.name, "arguments": "",
+				"type": "function_call", "id": bs.itemID, "call_id": bs.id, "name": bs.name, "arguments": "",
 			}))
 		}
 	case "content_block_delta":
@@ -371,7 +417,7 @@ func (sc *StreamConverter) dispatchResponses(etype string, ev *sseEvent, events 
 				return false, errclass.Translation("tool arguments fragment without a tool_use block start")
 			}
 			bs.args.WriteString(ev.Delta.PartialJSON)
-			*events = append(*events, sc.responsesEm().ArgsDelta(bs.id, bs.outIdx, ev.Delta.PartialJSON))
+			*events = append(*events, sc.responsesEm().ArgsDelta(bs.itemID, bs.outIdx, ev.Delta.PartialJSON))
 		case "thinking_delta":
 			// FR-005 explicit omission policy: no standard Responses
 			// reasoning-delta event; dropped.
@@ -384,7 +430,7 @@ func (sc *StreamConverter) dispatchResponses(etype string, ev *sseEvent, events 
 		sc.captureCache(ev.Usage)
 		sc.stopReason = ev.Delta.StopReason
 	case "message_stop":
-		*events = append(*events, sc.responsesCompleted())
+		*events = append(*events, sc.responsesCompleted()...)
 		return true, nil
 	case "error":
 		return false, sseError(ev.Error)
@@ -398,13 +444,35 @@ func (sc *StreamConverter) dispatchResponses(etype string, ev *sseEvent, events 
 // from the Responses vocabulary {completed, incomplete} via the observed
 // stop_reason (max_tokens truncation → incomplete); tool calls are
 // represented by their function_call output items and never override the
-// status (FR-006). Shared by message_stop and Flush so an early upstream
-// close cannot diverge from the normal-path shape.
-func (sc *StreamConverter) responsesCompleted() []byte {
+// status (FR-006). Each function_call is closed at its announced
+// output_index before completed — arguments.done then item.done, in
+// upstream index order — because clients finish a call only after the
+// matching done events (ported upstream v0.1.3). Shared by message_stop
+// and Flush so an early upstream close cannot diverge from the
+// normal-path shape.
+func (sc *StreamConverter) responsesCompleted() [][]byte {
 	status := shared.ResponseStatusFromClaudeStop(sc.stopReason)
 	usage := shared.NewResponsesUsageFrom(sc.promptTokens+valueOrZero(sc.cacheRead)+valueOrZero(sc.cacheCreation), sc.completionTokens,
 		shared.UsageDetails{CachedTokens: sc.cacheRead, CacheWriteTokens: sc.cacheCreation})
-	return sc.responsesEm().Completed(status, usage, sc.outputItems())
+	em := sc.responsesEm()
+	indexes := make([]int, 0, len(sc.blocks))
+	for i := range sc.blocks {
+		indexes = append(indexes, i)
+	}
+	sort.Ints(indexes)
+	events := make([][]byte, 0, len(indexes)*2+1)
+	for _, i := range indexes {
+		bs := sc.blocks[i]
+		if bs == nil || bs.kind != "tool_use" {
+			continue
+		}
+		item := shared.RespItem{
+			Type: "function_call", ID: shared.FunctionCallItemID(bs.id), CallID: bs.id,
+			Name: bs.name, Arguments: shared.DefaultArgs(bs.args.String()),
+		}
+		events = append(events, em.ArgsDone(item.ID, bs.outIdx, item.Arguments, item)...)
+	}
+	return append(events, em.Completed(status, usage, sc.outputItems()))
 }
 
 // responsesEm binds the shared Responses emitter kernel to the captured
@@ -425,12 +493,16 @@ func (sc *StreamConverter) Flush() [][]byte {
 		return nil
 	}
 	sc.flushed = true
-	if !sc.emitted {
+	// A normally-terminated stream already emitted its terminal (message_stop
+	// synthesizes response.completed on the Responses target); Flush guards
+	// the same TerminalSeen condition FinalizeStream does so a late call never
+	// re-emits a second terminal.
+	if !sc.emitted || sc.streamState.Snapshot.TerminalSeen {
 		return nil
 	}
 	switch sc.sourceFormat {
 	case "openai-response":
-		return [][]byte{sc.responsesCompleted()}
+		return sc.responsesCompleted()
 	case "openai":
 		return nil
 	default: // claude passthrough forwards verbatim; nothing deferred
@@ -534,7 +606,7 @@ func sseError(e map[string]any) *errclass.Error {
 	if strings.Contains(strings.ToLower(errorType), "gousagelimiterror") || strings.Contains(strings.ToLower(errorType), "freeusagelimiterror") {
 		message = errorType + ": " + message
 	}
-	return errclass.FromStatus(anthropicErrorStatus(errorType), message)
+	return shared.ClassifyUpstreamError(anthropicErrorStatus(errorType), errorType, message)
 }
 
 func anthropicErrorStatus(t string) int {

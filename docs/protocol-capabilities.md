@@ -18,11 +18,17 @@ that the plugin provides the skipped hosted service.
 | Hosted `code_interpreter`, `web_search`, `file_search`, `computer` | CPA Responses→Chat skips these declarations | Default `cpa` mode skips them; `strict` rejects. The plugin does not host them | Upstream-owned, not provided by the plugin |
 | Messages/custom symmetric conversion | CPA-dependent | P2 not implemented; do not assume symmetry | Not applicable |
 
-## Selecting the native Responses route
+## Selecting an upstream route
 
-The plugin does not probe model capabilities or infer routes from model names.
-Every catalog model uses Chat Completions by default. To select a native
-Responses upstream for one exact catalog ID, configure:
+The plugin reads `supported_endpoints` from each `/provider/v1/models` entry.
+Without an explicit override it prefers Responses, then Chat Completions, then
+Messages, but only among endpoints declared for that model. The provider's
+current endpoint suffixes (`/responses`, `/chat/completions`, `/messages`) and
+full `/v1/...` paths are accepted. Legacy entries that omit the field retain
+the Chat Completions fallback; entries that provide an empty or unrecognized
+list are excluded with a diagnostic. An explicit route override still wins.
+
+To force a route for one exact catalog ID, configure:
 
 ```yaml
 route-overrides:
@@ -33,7 +39,15 @@ route-overrides:
 
 The executor then calls `/v1/responses` and does not apply
 `responses-compatibility`; that policy is only for Responses translated
-through the Chat route. Without this override, Responses retains Chat fallback.
+through the Chat route. Without an override, the model catalog's declared
+endpoint set determines whether native Responses is selected.
+
+## Zero data retention
+
+The executor forwards only the documented `x-cmd-zdr: 1` opt-in from the
+client; arbitrary inbound headers are not relayed upstream. A provider
+`cmd_zdr_no_providers` error remains non-retryable and is not converted into a
+request to another endpoint.
 
 ## Responses-to-Chat compatibility modes
 

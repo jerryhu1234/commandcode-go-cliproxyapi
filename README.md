@@ -53,7 +53,7 @@ Without this plugin, using a CommandCode Go/GOAT/Pro/Max plan in CLIProxyAPI req
 
 ## Requirements
 
-- **CLIProxyAPI**: `v7.3.15` is the validated host for v0.2.8 (plugin ABI 1, schema 6); the plugin SDK dependency remains v7.3.6
+- **CLIProxyAPI**: the plugin SDK is anchored at `v8.0.67`; the wire contract stays plugin ABI 1, schema 6 (`registeredSchemaVersion`), so the plugin loads on both v7.3.15 and v8.0.x hosts (v8.0.56 exercised by the host in use)
 - **Management Center**: `1.13.x`
 - **Go Toolchain**: Go 1.26.7 (CGO enabled for `-buildmode=c-shared`)
 
@@ -124,7 +124,8 @@ plugins:
       stream-total-timeout: "30m"
       stream-finish-grace: "15s"
       max-response-bytes: 67108864        # 64 MiB
-      allow-http: false                   # http:// base-url for local testing
+      allow-http: false                   # http:// upstream for local testing
+      debug-tool-args-dump: false         # TEMP diagnosis: dump tool args on guard failure
 ```
 
 ### Configuration Options
@@ -140,7 +141,7 @@ plugins:
 | `catalog.stale-while-unavailable` | `bool` | `true` | Keep serving the last good snapshot when a refresh fails. |
 | `protocols.*` | `bool` | `true` | Route kill switches. A disabled protocol excludes its models with a diagnostic. |
 | `responses-compatibility` | `string` | `cpa` | `cpa` follows CPA v7.3.15 degradation rules; `strict` rejects unsupported/stateful Responses semantics before upstream. |
-| `route-overrides` | `map` | `{}` | `{ model: { protocol, endpoint } }` explicitly pins a model onto another route; no capability probing. A `responses` override calls native `/v1/responses` and bypasses `responses-compatibility`; without it, Responses uses the Chat fallback. `endpoint` is required. |
+| `route-overrides` | `map` | `{}` | `{ model: { protocol, endpoint } }` explicitly overrides the catalog route. Otherwise the plugin prefers Responses, Chat Completions, then Messages among the model's declared `supported_endpoints`; legacy entries without the field retain the Chat fallback. Native `/v1/responses` bypasses `responses-compatibility`. `endpoint` is required. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP timeout (also bounds account/quota calls to 30s). |
 | `stream-first-data-timeout` | `duration` | `60s` | Deadline for the first meaningful parsed stream progress, including stream-open time. |
 | `stream-idle-timeout` | `duration` | `3m` | Renewed only by meaningful parsed progress; ping/comments/duplicates do not renew it. |
@@ -148,6 +149,7 @@ plugins:
 | `stream-finish-grace` | `duration` | `15s` | Maximum wait after finish for usage/DONE before safe finalization or error. |
 | `max-response-bytes` | `int64` | `67108864` | Maximum non-streaming response body size. |
 | `allow-http` | `bool` | `false` | Permit `http://` upstreams for local testing. |
+| `debug-tool-args-dump` | `bool` | `false` | *Temporary diagnosis*: when the terminal tool-args guard fails a stream, append the accumulated tool-call arguments (`CCDBG` lines) to `commandcode-toolargs.log` next to the host binary, so truncation/concatenation can be attributed upstream vs. plugin. Keep off in production. |
 | `predictor.enabled` | `bool` | `true` | Usage-prediction sampler behind the prediction page. |
 | `predictor.sample-interval` | `duration` | `10m` | Sampling cadence (minimum `2m`). |
 | `predictor.budget-per-minute` | `int` | `8` | Global account-API call budget per minute (1–10). |
@@ -210,7 +212,7 @@ or raw upstream errors.
 
 ### Reasoning effort
 
-CommandCode publishes **no capability API**: `{base-url}/models` returns only `id`, `object`, `created`, `owned_by`, `name` and `context_length`, and its `/alpha/*` account surface has no models or capabilities route. The per-model effort lists that exist live inside the vendor's own clients (the `command-code` CLI and the web app both ship a static table), and the upstream gateway itself accepts every value in the union `low | medium | high | xhigh | max` regardless of the per-model list.
+CommandCode's provider model catalog publishes endpoint support in `supported_endpoints`; the plugin uses that field for routing. It does not publish a reasoning-effort capability table: per-model effort lists live inside the vendor's own clients (the `command-code` CLI and web app ship static tables), and the upstream gateway accepts values in the union `low | medium | high | xhigh | max` regardless of those per-model lists.
 
 Consequences for this plugin:
 
@@ -289,7 +291,7 @@ deployment acceptance testing.
 
 This plugin was built with reference to two prior CommandCode plugins:
 
-- [opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi) (v0.1.7) is the direct ancestor: the adapter kernel, catalog, config, auth, and quota scaffolding come from there, and the CommandCode-specific behaviour — reasoning preservation, unattributed-capability effort passthrough, the chat-completions-only route default, and the account API used by the quota page — was adapted on top.
+- [opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi) (v0.1.7) is the direct ancestor: the adapter kernel, catalog, config, auth, and quota scaffolding come from there, and the CommandCode-specific behaviour — reasoning preservation, unattributed-capability effort passthrough, catalog-supported endpoint routing, and the account API used by the quota page — was adapted on top.
 - [cpa-plugin-commandcode](https://github.com/ahoo/cpa-plugin-commandcode) (ahoo) is an independent earlier CommandCode plugin whose write-up established the vendor behaviours this plugin had to reproduce: thinking text arriving under `reasoning` / `reasoning_details[].text` and never `reasoning_content`, the resulting need to backfill `reasoning_content` before CLIProxyAPI's openai→claude translator sees it, the SSE `data: ` prefix that streaming `/v1/messages` requires, and the fact that only fully-qualified vendor names (`deepseek/deepseek-v4.1-flash`) are accepted upstream.
 
 Repository: <https://github.com/mczhoucn/commandcode-go-cliproxyapi>

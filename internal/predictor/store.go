@@ -315,7 +315,7 @@ func (s *Store) ingestLocked(rec persistRecord) {
 			s.lastOK[v.KeyID] = v.S.Ts
 		}
 		if _, ok := s.labels[v.KeyID]; !ok {
-			s.labels[v.KeyID] = "Ollama credential"
+			s.labels[v.KeyID] = "CommandCode credential"
 		}
 	case hourRecord:
 		s.mergeHour(v)

@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/buildinfo"
 	"commandcode-go-cliproxyapi/internal/catalog"
@@ -429,8 +429,8 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 	}
 	var reg registrationResult
 	decodeResult(t, resp, &reg)
-	if reg.SchemaVersion != pluginabi.SchemaVersion {
-		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
+	if reg.SchemaVersion != registeredSchemaVersion {
+		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, registeredSchemaVersion)
 	}
 	if reg.Metadata.Name != "commandcode-go-cliproxyapi" || reg.Metadata.Version != buildinfo.Version ||
 		len(reg.Metadata.ConfigFields) != 0 {
@@ -747,6 +747,123 @@ func TestRegisterRefreshesWithConfiguredBearer(t *testing.T) {
 	}
 }
 
+// TestRefreshFallsThroughToNextConfiguredKey pins catalog-refresh failover
+// across configured keys: pinning the refresh to APIKeys[0] leaves the model
+// catalog stale forever once the first key dies, even when N-1 healthy keys
+// remain (P2-5).
+func TestRefreshFallsThroughToNextConfiguredKey(t *testing.T) {
+	dead, good := "sk-dead-key-refresh", "sk-good-key-refresh"
+	yamlText := "api-keys:\n  - value: " + dead + "\n  - value: " + good + "\n"
+	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		if method == pluginabi.MethodHostHTTPDo {
+			var wire map[string]any
+			if json.Unmarshal(payload, &wire) == nil {
+				if headers, ok := wire["headers"].(map[string]any); ok {
+					if auth, ok := headers["Authorization"].([]any); ok && len(auth) > 0 && auth[0].(string) == "Bearer "+dead {
+						return hostErr("upstream_down", "simulated upstream failure"), nil
+					}
+				}
+			}
+			return hostOK(pluginapi.HTTPResponse{
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{"Content-Type": []string{"application/json"}},
+				Body:       []byte(testCatalogJSON),
+			}), nil
+		}
+		return hostOK(map[string]any{}), nil
+	}}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(yamlText)); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	var static pluginapi.ModelResponse
+	decodeResult(t, mustHandle(t, m, "model.static", nil), &static)
+	if len(static.Models) != 1 {
+		t.Fatalf("models = %d, want 1 (catalog refresh must fall through to a healthy key)", len(static.Models))
+	}
+	fallthroughSeen := false
+	for _, c := range f.callsOf(pluginabi.MethodHostHTTPDo) {
+		var wire map[string]any
+		if json.Unmarshal(c.payload, &wire) != nil {
+			continue
+		}
+		if headers, ok := wire["headers"].(map[string]any); ok {
+			if auth, ok := headers["Authorization"].([]any); ok && len(auth) > 0 && auth[0].(string) == "Bearer "+good {
+				fallthroughSeen = true
+			}
+		}
+	}
+	if !fallthroughSeen {
+		t.Fatal("refresh never tried the second configured key")
+	}
+}
+
+// TestMaterializeSingleKeyFailureDoesNotAbortRegistration pins per-key
+// best-effort materialization: one poisoned/unparseable key must not fail
+// the whole registration (which would advertise no models at all); the key
+// that failed is logged and every other key still materializes, and the
+// registration only fails when every configured key fails to save (P2-4).
+func TestMaterializeSingleKeyFailureDoesNotAbortRegistration(t *testing.T) {
+	bad, good := "sk-poison-key", "sk-workable-key"
+	yamlText := "api-keys:\n  - value: " + bad + "\n  - value: " + good + "\n"
+	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		if method == pluginabi.MethodHostAuthSave {
+			var wire pluginapi.HostAuthSaveRequest
+			if json.Unmarshal(payload, &wire) == nil && strings.Contains(wire.Name, authKeyHash(bad)) {
+				return nil, errors.New("host save failed")
+			}
+			return hostOK(pluginapi.HostAuthSaveResponse{Name: wire.Name}), nil
+		}
+		return catalogResponder(true, testCatalogJSON)(method, payload)
+	}}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(yamlText))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("register rejected after single-key save failure: %s", resp)
+	}
+	saves := f.callsOf(pluginabi.MethodHostAuthSave)
+	if len(saves) != 2 {
+		t.Fatalf("auth save attempts = %d, want 2 (the healthy key must still be saved)", len(saves))
+	}
+	logAnyMaterializeWarn := false
+	for _, c := range f.callsOf(pluginabi.MethodHostLog) {
+		if strings.Contains(string(c.payload), "materializ") {
+			logAnyMaterializeWarn = true
+		}
+	}
+	if !logAnyMaterializeWarn {
+		t.Fatal("expected a host.log entry about the failed auth materialization")
+	}
+}
+
+// TestStreamPumpPanicIsContainedAndLogged pins the panic guard around the
+// stream pump goroutine: the plugin runs in-process inside the host, so an
+// unrecovered panic anywhere in the pump kills the whole CPA process (P1-a).
+func TestStreamPumpPanicIsContainedAndLogged(t *testing.T) {
+	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		return hostOK(map[string]any{}), nil
+	}}
+	m := NewManager(NewHostBridge(f.call))
+	func() {
+		defer m.recoverStreamPump("down-1")
+		panic("boom")
+	}()
+	logged := false
+	for _, c := range f.callsOf(pluginabi.MethodHostLog) {
+		if strings.Contains(string(c.payload), "panic") {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Fatal("stream pump panic was not logged to the host")
+	}
+}
+
 // TestRegisterWithBlockingCatalogReturnsQuickly pins the dedicated register
 // timeout: the synchronous lifecycle refresh must expire at
 // registerRefreshTimeout (10s), never at request-timeout (default 15m), and
@@ -905,7 +1022,7 @@ func TestRegisterSurvivesNilHostBridge(t *testing.T) {
 		t.Fatalf("registration must survive unavailable host client: %s", resp)
 	}
 	var reg registrationResult
-	if err := json.Unmarshal(env.Result, &reg); err != nil || reg.SchemaVersion != pluginabi.SchemaVersion {
+	if err := json.Unmarshal(env.Result, &reg); err != nil || reg.SchemaVersion != registeredSchemaVersion {
 		t.Fatalf("degraded registration malformed: %s", resp)
 	}
 }

@@ -388,13 +388,8 @@ func TestStreamResponsesFlow(t *testing.T) {
 		first := added[0]["item"].(map[string]any)
 		second := added[1]["item"].(map[string]any)
 		if first["type"] != "message" || first["id"] != "msg_9" ||
-			second["type"] != "function_call" || second["call_id"] != "call_1" {
+			second["type"] != "function_call" || second["call_id"] != "call_1" || second["id"] != "fc_call_1" {
 			t.Errorf("added items wrong: %v %v", first, second)
-		}
-		// function_call announcements stay call_id-only per the canonical
-		// shape (deltas resolve item_id via call_id).
-		if _, has := second["id"]; has {
-			t.Errorf("function_call announcement must not carry an id key: %v", second)
 		}
 		if added[0]["output_index"] != float64(0) || added[1]["output_index"] != float64(1) {
 			t.Errorf("added output_index wrong: %v %v", added[0], added[1])
@@ -406,8 +401,31 @@ func TestStreamResponsesFlow(t *testing.T) {
 		t.Errorf("text deltas = %v", textDeltas)
 	}
 	args := byName["response.function_call_arguments.delta"]
-	if len(args) != 1 || args[0]["item_id"] != "call_1" || args[0]["output_index"] != float64(1) || args[0]["delta"] != "{}" {
+	if len(args) != 1 || args[0]["item_id"] != "fc_call_1" || args[0]["output_index"] != float64(1) || args[0]["delta"] != "{}" {
 		t.Errorf("args deltas = %v", args)
+	}
+	argsDone := byName["response.function_call_arguments.done"]
+	if len(argsDone) != 1 || argsDone[0]["item_id"] != "fc_call_1" ||
+		argsDone[0]["output_index"] != float64(1) || argsDone[0]["arguments"] != "{}" {
+		t.Errorf("args done events = %v", argsDone)
+	}
+	itemDone := byName["response.output_item.done"]
+	if len(itemDone) != 1 || itemDone[0]["output_index"] != float64(1) {
+		t.Errorf("item done events = %v", itemDone)
+	} else {
+		doneItem := itemDone[0]["item"].(map[string]any)
+		if doneItem["type"] != "function_call" || doneItem["id"] != "fc_call_1" ||
+			doneItem["call_id"] != "call_1" || doneItem["arguments"] != "{}" {
+			t.Errorf("output_item.done item wrong: %v", doneItem)
+		}
+	}
+	// Closing transitions must precede response.completed: clients finish a
+	// call only after the matching done events (upstream v0.1.3 parity).
+	posDone := strings.Index(joined, `event: response.function_call_arguments.done`)
+	posItem := strings.Index(joined, `event: response.output_item.done`)
+	posComp := strings.Index(joined, `event: response.completed`)
+	if posDone < 0 || posItem < 0 || posComp < 0 || !(posDone < posItem && posItem < posComp) {
+		t.Errorf("closing events must precede response.completed in order (args.done=%d item.done=%d completed=%d)", posDone, posItem, posComp)
 	}
 	completed := byName["response.completed"][0]["response"].(map[string]any)
 	usage := completed["usage"].(map[string]any)
@@ -431,11 +449,8 @@ func TestStreamResponsesFlow(t *testing.T) {
 	}
 	callItem := output[1].(map[string]any)
 	if callItem["type"] != "function_call" || callItem["call_id"] != "call_1" ||
-		callItem["name"] != "f" || callItem["arguments"] != "{}" {
+		callItem["name"] != "f" || callItem["arguments"] != "{}" || callItem["id"] != "fc_call_1" {
 		t.Errorf("function_call item wrong: %v", callItem)
-	}
-	if _, has := callItem["id"]; has {
-		t.Errorf("function_call items stay call_id-only: %v", callItem)
 	}
 }
 
@@ -785,5 +800,112 @@ func TestStreamResponsesTextAggregationMatchesNonStream(t *testing.T) {
 	if msgItem["type"] != "message" || len(content) != 1 ||
 		content[0].(map[string]any)["text"] != "AB" {
 		t.Errorf("aggregated message item wrong: %v", msgItem)
+	}
+}
+
+// TestObserveFrameResolvesPayloadType pins the frame-state contract: the
+// framer returns etype="" for data-only frames (the resolution into a local
+// variable must feed BOTH conversion and observation). Before the fix a
+// fully valid data-only stream converted fine but never marked
+// Started/FinishSeen/TerminalSeen — freezing StreamSnapshot.Progress at 0
+// (so the pump's first-data timer killed the healthy stream) and making
+// FinalizeStream contradict Feed's done=true.
+func TestObserveFrameResolvesPayloadType(t *testing.T) {
+	sc := NewStreamConverter("openai-response")
+	_, done, eErr := feed(t, sc,
+		`data: {"type":"message_start","message":{"id":"m1","model":"glm-5.3","usage":{"input_tokens":2,"output_tokens":1}}}`+"\n\n")
+	if eErr != nil || done {
+		t.Fatalf("message_start: done=%v err=%v", done, eErr)
+	}
+	if !sc.StreamSnapshot().Started {
+		t.Fatal("payload-typed message_start was not observed into the frame state")
+	}
+	_, done, eErr = feed(t, sc,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":3}}`+"\n\n")
+	if eErr != nil || done {
+		t.Fatalf("message_delta: done=%v err=%v", done, eErr)
+	}
+	if !sc.StreamSnapshot().FinishSeen {
+		t.Fatal("payload-typed message_delta was not observed into the frame state")
+	}
+	events, done, eErr := feed(t, sc, `data: {"type":"message_stop"}`+"\n\n")
+	if eErr != nil {
+		t.Fatalf("message_stop errored: %v", eErr)
+	}
+	if !done {
+		t.Fatal("message_stop did not end the stream")
+	}
+	if !sc.StreamSnapshot().TerminalSeen {
+		t.Fatal("payload-typed message_stop left TerminalSeen unset — the stream is done but not terminal")
+	}
+	if fin, finErr := sc.FinalizeStream(); finErr != nil || len(fin) > 0 {
+		t.Fatalf("done=true contradicts FinalizeStream (err=%v events=%d)", finErr, len(fin))
+	}
+	if len(events) == 0 || !strings.Contains(string(events[len(events)-1]), "response.completed") {
+		t.Fatalf("message_stop on the responses target did not emit the terminal frame: %v", events)
+	}
+}
+
+// TestFlushAfterMessageStopDoesNotReemitTerminal pins Flush's one-shot
+// contract against a normally-terminated stream: the terminal
+// response.completed already went out with message_stop; a late Flush call
+// must not emit a second one (FinalizeStream guards on TerminalSeen; Flush
+// must too).
+func TestFlushAfterMessageStopDoesNotReemitTerminal(t *testing.T) {
+	sc := NewStreamConverter("openai-response")
+	_, done, eErr := feed(t, sc,
+		`data: {"type":"message_start","message":{"id":"m1","model":"glm-5.3","usage":{"input_tokens":1}}}`+"\n\n",
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`+"\n\n",
+		`data: {"type":"message_stop"}`+"\n\n")
+	if eErr != nil || !done {
+		t.Fatalf("normal stream: done=%v err=%v", done, eErr)
+	}
+	if extra := sc.Flush(); len(extra) != 0 {
+		t.Fatalf("_flush after message_stop re-emitted %d terminal frames: %v", len(extra), extra)
+	}
+}
+
+// TestOpenAITargetFinishChunkFollowsStopReason pins the finish-chunk shape on
+// the chat-completions target: message_delta carries usage updates too, and
+// a usage-only delta must NOT close the stream with a premature finish_reason
+// — the finish chunk waits for an actual stop_reason, and message_stop alone
+// still terminates the stream (mirroring observeFrame's non-empty guard).
+func TestOpenAITargetFinishChunkFollowsStopReason(t *testing.T) {
+	sc := NewStreamConverter("openai")
+	all, _, eErr := feed(t, sc,
+		`data: {"type":"message_start","message":{"id":"m1","model":"glm-5.3","usage":{"input_tokens":5}}}`+"\n\n")
+	if eErr != nil {
+		t.Fatalf("message_start errored: %v", eErr)
+	}
+	events, done, eErr := feed(t, sc,
+		`data: {"type":"message_delta","delta":{},"usage":{"input_tokens":6,"output_tokens":2}}`+"\n\n")
+	if eErr != nil || done {
+		t.Fatalf("usage-only message_delta: done=%v err=%v", done, eErr)
+	}
+	all = append(all, events...)
+	for _, e := range all {
+		if strings.Contains(string(e), `"finish_reason":"`) {
+			t.Fatalf("usage-only message_delta produced a premature finish chunk: %s", e)
+		}
+	}
+	deltaEvents, _, eErr := feed(t, sc,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":7,"output_tokens":3}}`+"\n\n")
+	if eErr != nil {
+		t.Fatalf("stop-bearing message_delta errored: %v", eErr)
+	}
+	all = append(all, deltaEvents...)
+	last, doneStop, _ := feed(t, sc, `data: {"type":"message_stop"}`+"\n\n")
+	all = append(all, last...)
+	if !doneStop {
+		t.Fatal("message_stop on the openai target should end the stream")
+	}
+	finishSeen := false
+	for _, e := range all {
+		if strings.Contains(string(e), `"finish_reason":"`) {
+			finishSeen = true
+		}
+	}
+	if !finishSeen {
+		t.Fatal("no finish_reason chunk ever emitted for the stop_reason-bearing stream")
 	}
 }

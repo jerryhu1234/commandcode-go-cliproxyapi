@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/config"
 )
@@ -148,6 +148,56 @@ func TestRefreshSuccess(t *testing.T) {
 	}
 }
 
+func TestCatalogSupportedEndpointsSelectPreferredRoute(t *testing.T) {
+	body := `{"data":[
+		{"id":"responses-preferred","supported_endpoints":["/chat/completions","/responses"]},
+		{"id":"responses-v1-path","supported_endpoints":["/v1/chat/completions","/v1/responses"]},
+		{"id":"chat-only","supported_endpoints":["/chat/completions"]},
+		{"id":"messages-only","supported_endpoints":["/messages"]},
+		{"id":"unknown-only","supported_endpoints":["/systemone"]},
+		{"id":"legacy-no-capabilities"}
+	]}`
+	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
+	m := newManager(testCfg(), fc)
+	mustRefresh(t, m)
+
+	wants := map[string]Route{
+		"responses-preferred":    RouteResponses,
+		"responses-v1-path":      RouteResponses,
+		"chat-only":              RouteChatCompletions,
+		"messages-only":          RouteMessages,
+		"legacy-no-capabilities": RouteChatCompletions,
+	}
+	for id, want := range wants {
+		got := findModel(t, m.Models(), id)
+		if got.Protocol != want || got.EndpointPath != want.EndpointPath() {
+			t.Errorf("%s route = %s %s, want %s %s", id, got.Protocol, got.EndpointPath, want, want.EndpointPath())
+		}
+	}
+	if got := m.Unsupported(); len(got) != 1 || got[0].UpstreamID != "unknown-only" ||
+		!strings.Contains(got[0].Reason, "no supported endpoint recognized") {
+		t.Fatalf("unsupported endpoint diagnostics = %+v", got)
+	}
+	if got := findModel(t, m.Models(), "responses-preferred").SupportedEndpoints; !reflect.DeepEqual(got, []string{"/chat/completions", "/responses"}) {
+		t.Fatalf("supported endpoints were not retained: %v", got)
+	}
+}
+
+func TestRouteOverrideBeatsSupportedEndpoints(t *testing.T) {
+	cfg := testCfg()
+	cfg.RouteOverrides = map[string]config.RouteOverride{
+		"forced-chat": {Protocol: "chat-completions", Endpoint: "/v1/chat/completions"},
+	}
+	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(
+		`{"data":[{"id":"forced-chat","supported_endpoints":["/responses"]}]}`)}}
+	m := newManager(cfg, fc)
+	mustRefresh(t, m)
+	got := findModel(t, m.Models(), "forced-chat")
+	if got.Protocol != RouteChatCompletions {
+		t.Fatalf("override lost to catalog capabilities: %+v", got)
+	}
+}
+
 func TestRoutePriorityMatrix(t *testing.T) {
 	cfg := testCfg()
 	cfg.RouteOverrides = map[string]config.RouteOverride{
@@ -187,16 +237,13 @@ func TestRoutePriorityMatrix(t *testing.T) {
 		t.Errorf("unknown id must take the default route: got %q", got)
 	}
 	if unsup := m.Unsupported(); len(unsup) != 0 {
-		t.Errorf("every catalog entry is routable under the Chat-Completions-only upstream: %+v", unsup)
+		t.Errorf("legacy catalog entries without endpoint metadata should remain routable: %+v", unsup)
 	}
 }
 
-// TestDefaultRouteAcrossCatalogIDs pins the Chat-Completions-only default:
-// every documented CommandCode model id — whatever its family or vendor
-// directory — resolves to /provider/v1/chat/completions unless a
-// route-override says otherwise (CommandCode serves OSS models there and
-// nowhere else: /messages rejects them and /responses is not registered).
-func TestDefaultRouteAcrossCatalogIDs(t *testing.T) {
+// TestLegacyDefaultRouteAcrossCatalogIDs pins the compatibility fallback for
+// legacy catalog entries that omit supported_endpoints.
+func TestLegacyDefaultRouteAcrossCatalogIDs(t *testing.T) {
 	ids := []string{
 		// Families that used to be pinned to responses or messages.
 		"grok-4.5",
@@ -249,11 +296,10 @@ func TestDefaultRouteAcrossCatalogIDs(t *testing.T) {
 	}
 }
 
-// TestDefaultRouteIgnoresVendorDirectories pins the ids CommandCode actually
-// publishes (vendor-prefixed, e.g. "z-ai/glm-5.3-flash") together with the
-// mixed-case variants: no vendor directory or case influences the route, and
-// the public id keeps the upstream id verbatim behind the configured prefix.
-func TestDefaultRouteIgnoresVendorDirectories(t *testing.T) {
+// TestLegacyDefaultRouteIgnoresVendorDirectories ensures that, when endpoint
+// metadata is absent, model naming does not affect the legacy fallback route
+// or the public ID mapping.
+func TestLegacyDefaultRouteIgnoresVendorDirectories(t *testing.T) {
 	ids := []string{
 		"deepseek/deepseek-v4.1-flash",
 		"z-ai/glm-5.3-flash",
@@ -649,10 +695,9 @@ func TestConcurrentRefreshAndReads(t *testing.T) {
 	readerWG.Wait()
 }
 
-// TestProtocolFlagsExcludeRoutes pins the kill-switch per route under the
-// Chat-Completions-only default: disabling the default route removes every
-// catalog model, while disabling messages or responses only bites for models
-// a route-override explicitly pinned onto that route.
+// TestProtocolFlagsExcludeRoutes pins the kill-switch per route for legacy
+// entries without endpoint metadata: disabling the default route removes
+// every such catalog model, while the other flags affect explicit overrides.
 func TestProtocolFlagsExcludeRoutes(t *testing.T) {
 	catalogBody := `{"data":[
 		{"id":"glm-5.2"},
@@ -981,8 +1026,8 @@ func TestSeedFromRevalidatesEndpointsAgainstNewBase(t *testing.T) {
 // it needs to bite.
 func TestSeedFromAppliesProtocolKillSwitch(t *testing.T) {
 	body := `{"data":[{"id":"minimax-m3"},{"id":"glm-5.2"}]}`
-	// minimax-m3 only reaches the messages route when a route-override pins
-	// it there: the Chat-Completions-only default routes everything else.
+	// This legacy fixture omits endpoint metadata, so minimax-m3 reaches
+	// Messages only because a route override pins it there.
 	pinnedMessages := map[string]config.RouteOverride{"minimax-m3": {Protocol: "messages"}}
 	prevCfg := testCfg()
 	prevCfg.RouteOverrides = pinnedMessages

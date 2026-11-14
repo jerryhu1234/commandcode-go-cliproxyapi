@@ -128,7 +128,10 @@ func TestPassthroughFailedWithStatusCode(t *testing.T) {
 
 func TestPassthroughErrorEventFallback(t *testing.T) {
 	_, _, eErr := runStream(t, "openai-response", frame("error", `{"message":"boom"}`))
-	if eErr == nil || eErr.Class != errclass.ClassUpstream || !eErr.Retryable || eErr.StatusCode != 0 {
+	// 502 keeps the gateway failure honest in client responses; the host's
+	// default recoverable-failure branch applies to it exactly as it did to
+	// the old status-0 (mapped-to-500) shape.
+	if eErr == nil || eErr.Class != errclass.ClassUpstream || !eErr.Retryable || eErr.StatusCode != 502 {
 		t.Fatalf("want retryable upstream failure, got %+v", eErr)
 	}
 }

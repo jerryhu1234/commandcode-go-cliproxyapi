@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/config"
 	"commandcode-go-cliproxyapi/resources"
@@ -179,6 +179,47 @@ func TestQuotaRefresh(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Errorf("endpoints called = %v", seen)
+	}
+}
+
+// TestFetchQuotaFallsBackToAccountName pins the identity fallback shared with
+// the predictor: an account whose whoami carries no email is labelled with its
+// handle instead of returning an empty label.
+func TestFetchQuotaFallsBackToAccountName(t *testing.T) {
+	const key = "quota-name-fallback-secret"
+	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		if method != pluginabi.MethodHostHTTPDo {
+			return hostOK(map[string]any{}), nil
+		}
+		var wire struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(payload, &wire); err != nil {
+			t.Fatalf("decode host request: %v", err)
+		}
+		body := ""
+		switch {
+		case strings.Contains(wire.URL, accountCreditsPath):
+			body = `{"credits":{"monthlyCredits":1},"windowLimits":{"limited":false}}`
+		case strings.Contains(wire.URL, accountSubscriptionPath):
+			body = `{"success":false}`
+		case strings.Contains(wire.URL, "/alpha/whoami"):
+			body = `{"success":true,"user":{"userName":"quota-user"},"org":null}`
+		default:
+			t.Fatalf("unexpected quota URL %q", wire.URL)
+		}
+		return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(body)}), nil
+	}}
+
+	_, label, email, err := fetchQuota(context.Background(), NewHostBridge(f.call), "https://quota.test/provider/v1", time.Second, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if label != "quota-user" {
+		t.Fatalf("label = %q, want the account handle", label)
+	}
+	if email != "" {
+		t.Fatalf("email = %q, want empty when the account reports none", email)
 	}
 }
 

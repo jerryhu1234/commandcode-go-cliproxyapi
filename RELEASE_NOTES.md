@@ -1,5 +1,167 @@
 # Release Notes
 
+## Unreleased — L0 orphan-credential diagnostic
+
+- Reports config-removed credentials at every lifecycle (register /
+  reconfigure): CommandCode-pattern auth files whose key digest is no longer
+  in the config are surfaced through host.log with their digests. These
+  entries are live, not cosmetic — the executor takes the upstream key from
+  the selected auth's attributes, so a removed key's file keeps being routed
+  (and failing against a rotated/revoked key) until an operator deletes it.
+  There is no host.auth.delete ABI yet, so this is diagnostic-only and
+  best-effort (an AuthList failure never blocks the lifecycle; digest-only
+  log fields, FR-011). Tombstone disable remains pending on verifying the
+  host's disabled-auth routing semantics.
+
+## Unreleased — P2 audit-fix batch
+
+- Self-classifies Cloudflare bot/WAF challenges: a 403 whose body carries a
+  challenge marker ("just a moment", "challenge-platform", "cf-mitigated",
+  "attention required") is re-titled `cloudflare challenge: …`, the phrase
+  the host's result path matches to apply its short-backoff cooldown
+  instead of the default credential-failure burn. The classifier inspects
+  the FULL upstream message (the last boundary that still holds it) — the
+  redacted 80-char snippet is deliberately NOT widened (FR-011); plain 403s
+  keep the auth-failure treatment.
+- Carries structured error detail to the host: upstream `Retry-After`
+  (delta-seconds form, capped at 1h) now flows into the executor envelope's
+  `retry_after_seconds`, and converter terminal failures close downstream
+  streams with `error_detail` (pluginabi.Error — code, redacted message,
+  HTTP status) which the host's stream bridge honors over the plain error
+  string. Older hosts ignore both fields, so nothing depends on their
+  presence.
+- Redacts the `api-key` / `api_key` header-name variants (no `x-` prefix,
+  hyphen or underscore) previously echoed by upstream bodies into error
+  messages; the shared idempotency and digit-required value-class semantics
+  are unchanged. The debug-trace sink also redacts every line before
+  writing, so raw error values logged during diagnosis can no longer carry
+  credential material.
+- Hardens predictor persistence for overlapping engines: compaction rewrites
+  use a unique temp file + fsync + directory fsync (a fixed `.tmp` name made
+  concurrent rewrites truncate each other and fail the loser's rename with
+  ENOENT), and appends/rewrites serialize through a flock-protected critical
+  section — the retired engine's final flush can no longer interleave with
+  the fresh engine's compaction when a reconfigure join gives up. Appends
+  also fsync, so a hard kill now loses at most one 5-minute flush window
+  (unchanged) but never leaves torn metadata after it.
+- Hardens the account-email sync: fsync before the atomic rename (and a
+  directory fsync after), plus a per-path in-process critical section so
+  overlapping refresh ticks read-merge-write serially. New tests pin the
+  field-preservation contract (email is the ONLY field that changes) and
+  concurrent-writer atomicity.
+- Fixes the data-only-frame state machine in the Messages adapter: frames
+  whose event type lives only in the payload (`data: {"type":"…"}") were
+  converted correctly but never observed — Started/FinishSeen/TerminalSeen
+  stayed unset, freezing StreamSnapshot.Progress at 0 so the pump's
+  first-data timer killed healthy streams, and making FinalizeStream
+  contradict Feed's done=true. Payload-resolved types now feed observation
+  too.
+- Fixes the terminal-frame one-shot contract: a late `Flush()` after a
+  normal `message_stop` termination no longer re-emits a second
+  `response.completed` (Flush now honors the same TerminalSeen guard as
+  FinalizeStream).
+- Fixes the premature finish chunk on the chat-completions target: a
+  usage-only `message_delta` no longer closes the stream with
+  `finish_reason`; the finish chunk waits for an actual stop_reason.
+- Lifecycle fixes: the register timeout now bounds the synchronous work as
+  one budget (the catalog refresh no longer gets a second independent 10s
+  window after auth materialization spent the first), the predictor build
+  runs on a fresh context instead of the spent lifecycle deadline (its
+  email-label reads silently bailed on an expired ctx), refreshOnce
+  tolerates a nil host bridge on the post-refresh diagnostics paths (a
+  successful register with unsupported-model warnings used to panic inside
+  the bridge and surface as plugin_error), and the auth-record build error
+  now wraps its cause.
+
+## Unreleased — P1 audit-fix batch
+
+- Broadens the billing-exhaustion remap to the status+message signature alone
+  (`insufficient credits` on a 400), independent of the provider error code:
+  the same depleted-account condition has been observed with code
+  `BAD_REQUEST`, with no code at all, and as a generic `invalid_request_error`
+  body. The host drops provider codes anyway (only HTTP status + message reach
+  its `MarkResult`), so the contract no longer depends on any exact code key.
+- Prefixes an upstream `unsupported_model` rejection with the host's
+  model-support vocabulary (`unsupported model: …`) when missing: the host
+  keeps only the message text and routes model-support failures through its
+  vocabulary matcher, landing them in the per-model state instead of
+  penalizing the credential; the plain-404 branch would cool for 12 hours.
+- Carries explicit host-visible HTTP statuses on error constructors that
+  previously returned status 0 (mapped to a generic 500 by the host, cooling /
+  rotating a credential for request-scoped failures): `Translation`→400,
+  `FromNetwork`→502, `UpstreamFallback`→502, `UnsupportedFormat`→422,
+  `UnsupportedPartType`→422.
+- Trims configured API key values (`TrimSpace` after `${ENV}` expansion):
+  quoted YAML values and block scalars can carry trailing whitespace/newlines,
+  and the auth-record identity is the sha256 of the raw value — untrimmed
+  variants of one key materialize two credentials (two files, two UI cards)
+  for the same account. Whitespace-only values now fall out of the existing
+  empty-value check; trimmed duplicates hit the existing duplicate check.
+- Catalog refresh now fails over across the configured keys instead of
+  pinning to `APIKeys[0]`: when the first key died (401), the model catalog
+  stayed stale forever even with healthy keys remaining. First success wins;
+  per-key failures log a warn. Total failure still errors.
+- Auth-record materialization is now per-key best-effort: one failing
+  `host.auth.save` call no longer fails the whole registration (which would
+  advertise no models at all); the failure is logged and every other key
+  still materializes. Registration still fails when every key fails to save.
+- Contains stream-pump panics in the executor goroutine and per-loop panics
+  in the predictor's refiller/flusher/sampler loops: both run inside the
+  host process as .so plugins, where an unrecovered panic aborts the whole
+  CPA pod. Panics are logged through host.log; the predictor's final flush
+  and `close(done)` still run so `WaitStopped` is never blocked.
+
+## Unreleased — CPA v8 SDK migration
+
+- Maps CommandCode's billing-exhaustion signal to the host's native cooling
+  path. The upstream returns "You have insufficient credits..." as HTTP 400 +
+  `BAD_REQUEST` + `invalid_request_error`; neither the v7 nor v8 error
+  conductor has a cooldown branch for 400 and the executor path treats it as
+  a request fault that also stops credential rotation, so a nearly depleted
+  account (e.g. $0.08 left) kept being selected and failing forever, pinned
+  harder by session affinity. `ClassifyUpstreamError` now re-exposes that
+  exact signature as 402 / `insufficient_credits` / `quota_exhaustion`, the
+  status both host generations cooldown (30 min) and rotate across. The
+  30-minute heartbeat doubles as top-up detection: purchasing credits
+  revives the account within one cooldown window, with no manual re-enable.
+  The `errclass.FromStatus` quota vocabulary also gains "insufficient
+  credits" so a 402/403/429 variant keeps quota semantics.
+- Anchors the SDK at `github.com/router-for-me/CLIProxyAPI/v8` `v8.0.67`
+  (previously `/v7` `v7.3.6`) and raises the go directive to `1.26.10`.
+  No code path changes: the C ABI version (1) and every wire struct the
+  plugin exchanges with the host are unchanged between v7.3.x and v8.0.x.
+- Pins the registration contract to schema 6 via a new
+  `registeredSchemaVersion` constant (`internal/plugin/plugin.go`), instead
+  of following `pluginabi.SchemaVersion`, which jumped 6→10 in the v8 SDK.
+  The v8 host accepts plugin schemas ≤ its own (10) and degrades gracefully,
+  so a schema-6 registration keeps the exact host negotiation semantics the
+  plugin was built and tested against on CPA v7 hosts.
+
+## v0.2.9 — Endpoint routing and first-depletion account identification
+
+- Ports upstream v0.1.3's streamed tool-call closure: the Messages route now
+  emits `response.function_call_arguments.done` and `response.output_item.done`
+  before `response.completed`, and every synthesized function_call item carries
+  an `fc_`-prefixed item id (stream announcements, argument deltas/done, and
+  final output) while retaining its original `call_id`. The Chat Completions
+  route already closed calls; it now uses the same fc_ item ids. This keeps
+  clients that finish a call only after its matching done events and keep only
+  fc_ ids (e.g. Pi) from leaving streamed tool calls unfinished. The
+  `custom_tool_call` variant keeps call_id-only item identity.
+- Reads model `supported_endpoints` and prefers native Responses, then Chat
+  Completions, then Messages; explicit route overrides still take precedence.
+  Legacy entries without endpoint metadata retain the Chat fallback.
+- Forwards the documented `x-cmd-zdr: 1` opt-in and retains provider error
+  codes; ZDR-unavailable and plan-upgrade errors are non-retryable.
+- First depletion now names the corresponding account, marks its prediction
+  card, and offers keyboard-accessible scroll/focus/highlight navigation.
+  Includes English/Chinese copy and a dark-theme contrast adjustment.
+- Fixes quota-auth test helpers' cross-VM prototype comparisons without
+  changing production authentication behavior or weakening strict assertions.
+
+Local artifacts are built from the current working tree, including existing
+opt-in tool-argument diagnostics. They are not a published/tagged release.
+
 ## v0.2.8 — Prediction readability and purchased-credits fixes
 
 Presentation and verdict fixes shared with the ollama plugin's predictor

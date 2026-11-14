@@ -4,3 +4,8 @@ plugins/
 *.dylib
 *.dll
 *.h
+
+# local work artifacts (never commit)
+/commandcode-go-cliproxyapi
+/mgr-git-114/
+docs/superpowers/

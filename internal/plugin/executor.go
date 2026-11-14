@@ -13,12 +13,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/adapter/chatcompletions"
 	"commandcode-go-cliproxyapi/internal/adapter/messages"
@@ -110,7 +111,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     url,
-		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
+		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID, req.Headers),
 		Body:    upstreamBody,
 	})
 	if err != nil {
@@ -119,7 +120,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	}
 	debugTrace("executor received non-stream status=%d body_len=%d", resp.StatusCode, len(resp.Body))
 	if resp.StatusCode >= 400 {
-		return classEnvelope(shared.UpstreamStatusError(resp.StatusCode, resp.Body)), nil
+		return classEnvelopeWithRetry(shared.UpstreamStatusError(resp.StatusCode, resp.Body), resp.Headers), nil
 	}
 	// Parse/envelope guard only; true OOM prevention belongs to the host transport's byte cap.
 	if int64(len(resp.Body)) > res.cfg.MaxResponseBytes {
@@ -144,7 +145,7 @@ func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat strin
 	return nil, errclass.Translation("unsupported route")
 }
 
-func upstreamAuthHeaders(route catalog.Route, key, sessionID string) http.Header {
+func upstreamAuthHeaders(route catalog.Route, key, sessionID string, inbound ...http.Header) http.Header {
 	var h http.Header
 	if route == catalog.RouteMessages {
 		h = messages.AuthHeaders(key)
@@ -153,6 +154,12 @@ func upstreamAuthHeaders(route catalog.Route, key, sessionID string) http.Header
 		h = chatcompletions.AuthHeaders(key)
 	}
 	h.Set("x-commandcode-session", sessionID)
+	// CommandCode uses this opt-in to route only through ZDR-capable upstreams.
+	// Forward only the documented enabled value; never relay arbitrary client
+	// headers across the plugin trust boundary.
+	if len(inbound) > 0 && strings.TrimSpace(inbound[0].Get("x-cmd-zdr")) == "1" {
+		h.Set("x-cmd-zdr", "1")
+	}
 	return h
 }
 
@@ -305,7 +312,25 @@ func convertNonStream(route catalog.Route, sourceFormat string, status int, body
 // classEnvelope renders a classified failure as the wire error envelope;
 // ToEnvelopeError redacts and propagates Retryable/HTTPStatus host-side.
 func classEnvelope(e *errclass.Error) []byte {
+	return classEnvelopeWithRetry(e, nil)
+}
+
+// classEnvelopeWithRetry adds the wire retry hint: RetryAfterSeconds exists
+// in the pluginabi contract and the host's conductor times credential
+// cooldowns from it; older hosts silently ignore it, so nothing depends on
+// its presence. Only the delta-seconds form is parsed (an HTTP-date cannot
+// be interpreted without clock skew risk); values are floored to positive
+// ints and capped at an hour so a buggy upstream cannot pin a credential.
+func classEnvelopeWithRetry(e *errclass.Error, headers http.Header) []byte {
 	wire := errclass.ToEnvelopeError(e)
+	if headers != nil {
+		if secs, err := strconv.Atoi(strings.TrimSpace(headers.Get("Retry-After"))); err == nil && secs > 0 {
+			if secs > 3600 {
+				secs = 3600
+			}
+			wire.RetryAfterSeconds = secs
+		}
+	}
 	out, _ := json.Marshal(pluginabi.Envelope{OK: false, Error: &wire})
 	return out
 }
@@ -401,7 +426,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 	st, _, id, err := m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     url,
-		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
+		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID, req.Headers),
 		Body:    upstreamBody,
 	})
 	debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v", st, id, err)
@@ -438,20 +463,42 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		if m.bridge != nil {
 			defer m.bridge.inFlight.Done()
 		}
+		// Panic containment: the pump consumes hostile upstream data inside
+		// the host process — an unrecovered panic here would abort the whole
+		// CPA host, not just this request.
+		defer m.recoverStreamPump(downID)
 		m.pumpStream(downID, id, res, req.SourceFormat, streamStart, responsesRequestContext(req))
 	}()
 	return okEnvelope(struct{}{}), nil
 }
 
+// recoverStreamPump absorbs a panic escaping the stream pump goroutine and
+// surfaces it through host.log. pumpStream's own deferred close already
+// released both streams before the panic reached this guard.
+func (m *Manager) recoverStreamPump(downID string) {
+	if r := recover(); r == nil {
+		return
+	}
+	if m.bridge == nil {
+		return
+	}
+	_ = m.bridge.Log("error", "stream pump panicked; downstream streams closed",
+		map[string]any{"downstream_id": downID})
+}
+
 func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string, streamStart time.Time, originalRequest ...[]byte) {
 	var closeOnce sync.Once
-	closeStreams := func(downErrMsg string) {
+	// closeStreams terminates both streams. detail, when non-nil, is the
+	// structured pluginabi.Error for the downstream close: the host bridge
+	// gives it precedence over the plain message, so classified failures
+	// keep their HTTP status / retry guidance for the client.
+	closeStreams := func(downErrMsg string, detail *pluginabi.Error) {
 		closeOnce.Do(func() {
 			_ = m.bridge.StreamClose(upstreamID)
-			_ = m.bridge.StreamCloseDownstream(downID, downErrMsg)
+			_ = m.bridge.StreamCloseDownstreamDetail(downID, downErrMsg, detail)
 		})
 	}
-	defer closeStreams("")
+	defer closeStreams("", nil)
 
 	conv := newStreamConverter(res.rec.Protocol, sourceFormat, originalRequest...)
 	limits := limitsFromConfig(res.cfg)
@@ -490,33 +537,34 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 				}); ok {
 					events, fErr := finalizer.FinalizeStream()
 					if fErr != nil {
-						closeStreams(errclass.Redact(fErr.Message))
+						wire := errclass.ToEnvelopeError(fErr)
+						closeStreams(wire.Message, &wire)
 						logDone("terminal_error", upstreamClosed)
 						return
 					}
 					if emitErr := m.emitAll(downID, events); emitErr != nil {
-						closeStreams(errclass.Redact(emitErr.Error()))
+						closeStreams(errclass.Redact(emitErr.Error()), nil)
 						logDone("emit_error", upstreamClosed)
 						return
 					}
 					logDone("finish_grace", upstreamClosed)
 					return
 				}
-				closeStreams("stream terminal incomplete")
+				closeStreams("stream terminal incomplete", nil)
 				logDone("terminal_error", upstreamClosed)
 				return
 			}
-			closeStreams(streamCauseError(cause))
+			closeStreams(streamCauseError(cause), nil)
 			logDone(cause, upstreamClosed)
 			return
 		}
 		if err != nil {
-			closeStreams(errclass.Redact(err.Error()))
+			closeStreams(errclass.Redact(err.Error()), nil)
 			logDone("read_error", upstreamClosed)
 			return
 		}
 		if readErrMsg != "" {
-			closeStreams(errclass.Redact(readErrMsg))
+			closeStreams(errclass.Redact(readErrMsg), nil)
 			logDone("upstream_error", upstreamClosed)
 			return
 		}
@@ -525,7 +573,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			chunks++
 		}
 		if total > res.cfg.MaxResponseBytes {
-			closeStreams(errclass.Redact("stream exceeded max-response-bytes"))
+			closeStreams(errclass.Redact("stream exceeded max-response-bytes"), nil)
 			logDone("max_bytes", upstreamClosed)
 			return
 		}
@@ -546,12 +594,13 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			}
 		}
 		if convErr != nil {
-			closeStreams(errclass.Redact(convErr.Message))
+			wire := errclass.ToEnvelopeError(convErr)
+			closeStreams(wire.Message, &wire)
 			logDone("terminal_error", upstreamClosed)
 			return
 		}
 		if emitErr := m.emitAll(downID, events); emitErr != nil {
-			closeStreams(errclass.Redact(emitErr.Error()))
+			closeStreams(errclass.Redact(emitErr.Error()), nil)
 			logDone("emit_error", upstreamClosed)
 			return
 		}
@@ -567,19 +616,20 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 		}); ok {
 			flushed, flushErr := flusher.FlushWithError()
 			if flushErr != nil {
-				closeStreams(errclass.Redact(flushErr.Message))
+				wire := errclass.ToEnvelopeError(flushErr)
+				closeStreams(wire.Message, &wire)
 				logDone("truncated", true)
 				return
 			}
 			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
-				closeStreams(errclass.Redact(emitErr.Error()))
+				closeStreams(errclass.Redact(emitErr.Error()), nil)
 				logDone("emit_error", true)
 				return
 			}
 		} else if flusher, ok := conv.(interface{ Flush() [][]byte }); ok {
 			flushed := flusher.Flush()
 			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
-				closeStreams(errclass.Redact(emitErr.Error()))
+				closeStreams(errclass.Redact(emitErr.Error()), nil)
 				logDone("emit_error", true)
 				return
 			}

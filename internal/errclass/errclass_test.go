@@ -2,9 +2,10 @@ package errclass
 
 import (
 	"errors"
+	"net/http"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 )
 
 func TestClassConstants(t *testing.T) {
@@ -49,8 +50,10 @@ func TestFromStatus(t *testing.T) {
 		{"429 rate limit", 429, "too many", ClassRateLimit, true},
 		{"429 quota text upgrades", 429, "quota exceeded for project", ClassQuota, true},
 		{"429 Go usage limit", 429, "GoUsageLimitError", ClassRateLimit, true},
+		{"429 insufficient-credits text upgrades", 429, "you have insufficient credits", ClassQuota, true},
 		{"403 quota text upgrades", 403, "quota exhausted", ClassQuota, true},
 		{"402 quota text bills as quota", 402, "quota depleted", ClassQuota, true},
+		{"402 insufficient-credits text bills as quota", 402, "insufficient credits left", ClassQuota, true},
 		{"408 client timeout unsupported", 408, "request timeout", ClassUnsupported, false},
 		{"502 upstream", 502, "bad gateway", ClassUpstream, true},
 		{"500 upstream", 500, "boom", ClassUpstream, true},
@@ -71,7 +74,8 @@ func TestFromStatus(t *testing.T) {
 
 func TestFromNetwork(t *testing.T) {
 	e := FromNetwork(errors.New("dial tcp: refused"))
-	if e.Class != ClassNetwork || !e.Retryable || e.StatusCode != 0 ||
+	if e.Class != ClassNetwork || !e.Retryable ||
+		e.StatusCode != http.StatusBadGateway ||
 		e.Message != "dial tcp: refused" {
 		t.Errorf("FromNetwork(err) = %+v", e)
 	}
@@ -83,8 +87,23 @@ func TestFromNetwork(t *testing.T) {
 
 func TestTranslation(t *testing.T) {
 	e := Translation("cannot map tool calls")
-	if e.Class != ClassTranslation || e.Retryable || e.StatusCode != 0 {
+	if e.Class != ClassTranslation || e.Retryable || e.StatusCode != http.StatusBadRequest {
 		t.Errorf("Translation() = %+v", e)
+	}
+}
+
+// TestZeroStatusConstructorsCarryHostVisibleHTTPStatus pins the constructors
+// for request-side and network-side failures to real HTTP statuses: the host
+// maps HTTPStatus 0 to 500 and then cools/rotates the credential for what is
+// actually a malformed client request (400/422) or an upstream transport
+// failure (502) — see conductor_cooldown.go's default recoverable-failure
+// branch.
+func TestZeroStatusConstructorsCarryHostVisibleHTTPStatus(t *testing.T) {
+	if got := Translation("untranslatable body").StatusCode; got != http.StatusBadRequest {
+		t.Errorf("Translation status = %d, want 400", got)
+	}
+	if got := UpstreamFallback("stream broke").StatusCode; got != http.StatusBadGateway {
+		t.Errorf("UpstreamFallback status = %d, want 502", got)
 	}
 }
 
@@ -96,7 +115,7 @@ func TestUpstreamFallback(t *testing.T) {
 	if !e.Retryable {
 		t.Error("Retryable = false, want true (§7: upstream server failures are retryable)")
 	}
-	if e.StatusCode != 0 {
+	if e.StatusCode != 502 {
 		t.Errorf("StatusCode = %+v", e)
 	}
 	want := "upstream stream broke: Bearer [redacted] mid-chunk"
@@ -128,6 +147,14 @@ func TestToEnvelopeError(t *testing.T) {
 	want := pluginabi.Error{Code: "auth_failure", Message: "Bearer [redacted] failed", Retryable: false, HTTPStatus: 401}
 	if got != want {
 		t.Errorf("ToEnvelopeError = %+v, want %+v", got, want)
+	}
+
+	provider := ToEnvelopeError(&Error{
+		Class: ClassUnsupported, UpstreamCode: "cmd_zdr_no_providers",
+		Message: "no ZDR provider", StatusCode: 422,
+	})
+	if provider.Code != "cmd_zdr_no_providers" || provider.HTTPStatus != 422 {
+		t.Errorf("provider code not preserved in envelope: %+v", provider)
 	}
 }
 
@@ -167,6 +194,37 @@ func TestRedactAPIKeyEchoes(t *testing.T) {
 		{"x-api-key: abc123 next", "x-api-key: abc123 next"},
 		// Bearer behavior unchanged alongside the new pattern.
 		{"Bearer tok1 then x-api-key: sk-99887766aabb end", "Bearer [redacted] then x-api-key: [redacted] end"},
+	}
+	for _, tc := range tests {
+		got := Redact(tc.in)
+		if got != tc.want {
+			t.Errorf("Redact(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if again := Redact(got); again != got {
+			t.Errorf("Redact not idempotent on %q: %q", got, again)
+		}
+	}
+}
+
+// TestRedactBareAPIKeyEchoes covers the header-name variants the x-api-key
+// pattern misses: providers that use "api-key:" / "api_key" (no x- prefix)
+// as the credential header or JSON field name. Upstream error bodies have
+// been observed echoing both forms; the value must never survive into an
+// envelope or a log (FR-011).
+func TestRedactBareAPIKeyEchoes(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"upstream said api-key: sk-ant-api03-9f2Kx7QwLp end", "upstream said api-key: [redacted] end"},
+		{"auth failed api-key=AWS4wJalrz12345678 retry", "auth failed api-key=[redacted] retry"},
+		{`{"error":{"message":"invalid api_key sk-live-ab12cd34ef"}}`, `{"error":{"message":"invalid api_key [redacted]"}}`},
+		{"echo API-Key zy98xw76vu54 done", "echo API-Key [redacted] done"},
+		// x-api-key behavior is unchanged and not mangled into x-[redacted].
+		{"upstream said x-api-key: sk-ant-api03-9f2Kx7QwLp end", "upstream said x-api-key: [redacted] end"},
+		// Prose after the bare name must not be mangled; too-short values stay.
+		{"missing api-key authentication header", "missing api-key authentication header"},
+		{"api-key: request rejected by policy", "api-key: request rejected by policy"},
+		{"api-key: abc123 next", "api-key: abc123 next"},
+		// Related words with no key value must pass through untouched.
+		{"api keys are rotated weekly", "api keys are rotated weekly"},
 	}
 	for _, tc := range tests {
 		got := Redact(tc.in)

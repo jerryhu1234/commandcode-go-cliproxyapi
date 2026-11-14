@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -171,8 +172,8 @@ func (e *Engine) Start() {
 		e.restorePersisted()
 	}
 	e.wg.Add(2)
-	go e.refillLoop()
-	go e.flushLoop()
+	go e.runLoop("refillLoop", e.refillLoop)
+	go e.runLoop("flushLoop", e.flushLoop)
 	// Phase = stagger*(i+1): the FIRST sample of every key also waits a
 	// full stagger slot, so a lifecycle (register/reconfigure) never fires
 	// upstream calls synchronously — the host sees its first predictor
@@ -182,13 +183,41 @@ func (e *Engine) Start() {
 	for i, kr := range e.opts.Keys {
 		kr := kr
 		e.wg.Add(1)
-		go e.keyLoop(kr, stagger*time.Duration(i+1))
+		go e.runLoop("keyLoop:"+kr.ID, func() { e.keyLoop(kr, stagger*time.Duration(i+1)) })
 	}
 	go func() {
 		e.wg.Wait()
-		e.finalFlush()
+		// The final flush and close(done) must run even if flush panics:
+		// close(done) is what unblocks WaitStopped and lets the host
+		// shutdown sequence proceed instead of waiting out the timeout.
+		func() {
+			defer e.guardPanic("finalFlush")
+			e.finalFlush()
+		}()
 		close(e.done)
 	}()
+}
+
+// runLoop wraps a predictor goroutine body with the per-loop panic guard:
+// predictor loops run inside the host process, so an unrecovered panic in
+// refiller, flusher, or sampler code aborts the whole CPA host.
+func (e *Engine) runLoop(name string, body func()) {
+	defer e.guardPanic(name)
+	body()
+}
+
+// guardPanic absorbs a panic escaping a background loop and logs it through
+// the engine's logger. It stays silent on the normal (no-panic) path so the
+// logger is reserved for real incidents.
+func (e *Engine) guardPanic(name string) {
+	if r := recover(); r == nil {
+		return
+	}
+	log := e.opts.Log
+	if log == nil {
+		return
+	}
+	log("error", "predictor loop panicked; loop stopped", map[string]any{"loop": name})
 }
 
 // restorePersisted streams the history file into the store line by line
@@ -512,9 +541,17 @@ func (e *Engine) Snapshot(deadline *time.Time) Response {
 	for _, kr := range e.opts.Keys {
 		keyIDs = append(keyIDs, kr.ID)
 		accel[kr.ID] = e.accelerate(kr.ID)
-		resp.Accounts = append(resp.Accounts, buildAccountView(
+		view := buildAccountView(
 			e.store, kr.ID, now, e.opts.StaleAfter, SamplingRateSource{}, accel,
-		))
+		)
+		// A label persisted by an older build is the digest fallback, not an
+		// account identity. The configured label is the mailbox/identity the
+		// plugin resolved for this key, so it wins until the next sample
+		// records it in the store.
+		if isCredentialFallbackLabel(view.Label) && kr.Label != "" {
+			view.Label = kr.Label
+		}
+		resp.Accounts = append(resp.Accounts, view)
 	}
 	resp.ByType = map[string]FleetView{
 		e.opts.TypeKey: BuildFleetView(e.store, keyIDs, FleetOptions{
@@ -587,6 +624,11 @@ func (p *persister) load(sink func(persistRecord)) (int, error) {
 func (p *persister) append(recs []persistRecord) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	unlock, err := p.lockSharedPath()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := os.MkdirAll(filepath.Dir(p.path), 0o755); err != nil {
 		return err
 	}
@@ -596,25 +638,80 @@ func (p *persister) append(recs []persistRecord) error {
 	}
 	defer f.Close()
 	_, err = f.Write(EncodeRecords(recs))
-	return err
+	if err != nil {
+		return err
+	}
+	// Crash durability: samples survive a hard kill only if the bytes reach
+	// disk; O_APPEND+fsync costs one sync per flush tick (defaults ride a
+	// 5-minute cadence + one shutdown flush, not per sample).
+	return f.Sync()
 }
 
-// rewrite replaces the file atomically (tmp + rename) — the compaction
-// path, also used right after a restore so the file stops growing.
+// lockSharedPath serializes writers on one history file across overlapping
+// engines: Stop joins goroutines within the engine's own budget, but a
+// reconfigure that gives up still leaves the retired engine flushing while
+// the fresh engine compacts — flock (per open file description, so it
+// contends between goroutines of one process too, and between processes)
+// makes each append/rewrite critical section atomic.
+func (p *persister) lockSharedPath() (func(), error) {
+	lockPath := p.path + ".lock"
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return func() {}, err
+	}
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lf.Close()
+		return func() {}, err
+	}
+	return func() {
+		_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+		_ = lf.Close()
+	}, nil
+}
+
+// rewrite replaces the file atomically (unique tmp + fsync + rename) — the
+// compaction path, also used right after a restore so the file stops
+// growing. The tmp name is deliberately unique per call: two overlapping
+// writers sharing a fixed tmp name truncate each other's payloads and the
+// loser's rename fails ENOENT once the winner moved it.
 func (p *persister) rewrite(recs []persistRecord) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	unlock, err := p.lockSharedPath()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := os.MkdirAll(filepath.Dir(p.path), 0o755); err != nil {
 		return err
 	}
-	tmp := p.path + ".tmp"
-	if err := os.WriteFile(tmp, EncodeRecords(recs), 0o600); err != nil {
-		_ = os.Remove(tmp) // D10: no stray half-written temp files left behind
+	tmp, err := os.CreateTemp(filepath.Dir(p.path), filepath.Base(p.path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, p.path); err != nil {
-		_ = os.Remove(tmp)
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }() // D10: no stray half-written temp files
+	if _, err := tmp.Write(EncodeRecords(recs)); err != nil {
+		_ = tmp.Close()
 		return err
+	}
+	// fsync the payload before the rename: after a crash the renamed file
+	// must never hold the old name's metadata pointing at zeroed blocks.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, p.path); err != nil {
+		return err
+	}
+	// Persist the rename itself so the new history is visible after reboot
+	// (best effort: failure here loses durability, not correctness).
+	if dirf, derr := os.Open(filepath.Dir(p.path)); derr == nil {
+		_ = dirf.Sync()
+		_ = dirf.Close()
 	}
 	return nil
 }

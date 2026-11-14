@@ -94,6 +94,11 @@ type Config struct {
 	StreamFinishGrace      time.Duration
 	MaxResponseBytes       int64
 	ResponsesCompatibility string
+	// DebugToolArgsDump turns on the TEMP DIAGNOSTIC tool-args guard dump
+	// (commandcode-toolargs.log next to the host binary). Off by default;
+	// remove together with the diagnostic plumbing once the guard
+	// attribution is settled.
+	DebugToolArgsDump bool
 }
 
 // rawConfig mirrors the YAML shape; pointer fields distinguish "unset"
@@ -116,6 +121,7 @@ type rawConfig struct {
 	StreamFinishGrace      *string                  `yaml:"stream-finish-grace"`
 	MaxResponseBytes       *int64                   `yaml:"max-response-bytes"`
 	ResponsesCompatibility *string                  `yaml:"responses-compatibility"`
+	DebugToolArgsDump      *bool                    `yaml:"debug-tool-args-dump"`
 }
 
 type rawPrefix struct {
@@ -169,7 +175,13 @@ func Load(yamlBytes []byte) (Config, error) {
 	}
 	keys := make([]APIKey, len(raw.APIKeys))
 	for i, k := range raw.APIKeys {
-		keys[i] = APIKey{Value: os.ExpandEnv(k.Value)}
+		// TrimSpace before hashing/validating: quoted YAML values and ${ENV}
+		// expansion can carry trailing whitespace/newlines, and the auth-record
+		// identity is sha256(raw) — untrimmed variants of one key would
+		// materialize two credentials for the same account. Empty after trim
+		// falls out of the existing expanded-to-empty check; equal trimmed
+		// values hit the existing duplicate check.
+		keys[i] = APIKey{Value: strings.TrimSpace(os.ExpandEnv(k.Value))}
 	}
 	refreshInterval, err := parseDuration("catalog.refresh-interval", raw.Catalog.RefreshInterval, DefaultRefreshInterval)
 	if err != nil {
@@ -249,6 +261,7 @@ func Load(yamlBytes []byte) (Config, error) {
 		StreamFinishGrace:      streamFinishGrace,
 		MaxResponseBytes:       orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
 		ResponsesCompatibility: strings.ToLower(strings.TrimSpace(orDefault(raw.ResponsesCompatibility, DefaultResponsesCompatibility))),
+		DebugToolArgsDump:      orDefault(raw.DebugToolArgsDump, false),
 	}
 	if raw.CatalogURL != nil {
 		// Mirror the derived-default trim so an explicit trailing-slash

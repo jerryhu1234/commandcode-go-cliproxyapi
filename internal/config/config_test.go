@@ -20,6 +20,39 @@ func requireErrContains(t *testing.T, err error, want string) {
 // that target a later validation check.
 const withKey = "api-keys:\n  - value: sk-dummy\n"
 
+// TestAPIKeyValuesAreTrimmed pins key normalization: values quoted in YAML
+// may carry pasted trailing whitespace or newline (block scalars, editor
+// artifacts, ${ENV} expansion), and the auth-record identity is the sha256
+// of the raw value — without trimming, one real key becomes two credentials
+// with two files and two UI cards for the same account.
+func TestAPIKeyValuesAreTrimmed(t *testing.T) {
+	c, err := Load([]byte("api-keys:\n  - value: \"  sk-trimmed  \"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.APIKeys) != 1 || c.APIKeys[0].Value != "sk-trimmed" {
+		t.Errorf("APIKeys = %+v, want [sk-trimmed]", c.APIKeys)
+	}
+}
+
+// TestAPIKeyWhitespaceVariantsAreDuplicates rejects whitespace-only variants
+// of the same key instead of silently materializing two credentials.
+func TestAPIKeyWhitespaceVariantsAreDuplicates(t *testing.T) {
+	_, err := Load([]byte("api-keys:\n  - value: \"sk-dummy\\n\"\n  - value: \" sk-dummy \"\n"))
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("Load error = %v, want duplicate-key rejection", err)
+	}
+}
+
+// TestAPIKeyWhitespaceOnlyIsRejected closes the gap where "   " passes the
+// empty-value check and later fails the whole registration at parse time.
+func TestAPIKeyWhitespaceOnlyIsRejected(t *testing.T) {
+	_, err := Load([]byte("api-keys:\n  - value: \"   \"\n"))
+	if err == nil || !strings.Contains(err.Error(), "expanded to empty") {
+		t.Errorf("Load error = %v, want expanded-to-empty rejection", err)
+	}
+}
+
 func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	c, err := Load([]byte(withKey))
 	if err != nil {
@@ -184,6 +217,23 @@ func TestRequestTimeoutDoesNotDeriveStreamTimeouts(t *testing.T) {
 		c.StreamIdleTimeout != DefaultStreamIdleTimeout || c.StreamTotalTimeout != DefaultStreamTotalTimeout ||
 		c.StreamFinishGrace != DefaultStreamFinishGrace {
 		t.Fatalf("request timeout affected stream defaults: %+v", c)
+	}
+}
+
+func TestDebugToolArgsDumpDefaultAndExplicit(t *testing.T) {
+	c, err := Load([]byte(withKey))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if c.DebugToolArgsDump {
+		t.Fatalf("DebugToolArgsDump default = true, want false")
+	}
+	c, err = Load([]byte(withKey + "debug-tool-args-dump: true\n"))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !c.DebugToolArgsDump {
+		t.Fatalf("DebugToolArgsDump explicit true not preserved")
 	}
 }
 

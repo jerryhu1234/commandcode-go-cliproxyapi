@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/config"
 	"commandcode-go-cliproxyapi/internal/predictor"
@@ -55,6 +55,126 @@ const (
 	testSubscriptionBody = `{"success":true,"data":{"planId":"individual-pro-v1",` +
 		`"status":"active","currentPeriodEnd":"2026-11-01T04:05:06.000Z"}}`
 )
+
+// predictorIdentityResponder answers the auth-file email lookup plus the
+// credits/subscriptions/whoami fan-out used by the predictor label fallback.
+func predictorIdentityResponder(email, whoami string) func(string, []byte) ([]byte, error) {
+	return func(method string, payload []byte) ([]byte, error) {
+		if method == pluginabi.MethodHostAuthList {
+			files := []pluginapi.HostAuthFileEntry{}
+			if email != "" {
+				id, _ := quotaIdentity(testKey)
+				files = append(files, pluginapi.HostAuthFileEntry{
+					ID: id + ".json", Name: id + ".json", Email: email, Source: "file",
+				})
+			}
+			return hostOK(hostAuthListResponse{Files: files}), nil
+		}
+		if method != pluginabi.MethodHostHTTPDo {
+			return hostOK(map[string]any{}), nil
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(payload, &wire); err != nil {
+			return hostErr("bad_request", "malformed bridge payload"), nil
+		}
+		url, _ := wire["url"].(string)
+		body := ""
+		switch {
+		case strings.Contains(url, "/alpha/billing/credits"):
+			body = testCreditsBody
+		case strings.Contains(url, "/alpha/billing/subscriptions"):
+			body = testSubscriptionBody
+		case strings.Contains(url, "/alpha/whoami"):
+			body = whoami
+		default:
+			return hostErr("upstream_down", "unexpected predictor URL "+url), nil
+		}
+		return hostOK(pluginapi.HTTPResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"application/json"}},
+			Body:       []byte(body),
+		}), nil
+	}
+}
+
+// TestFetchPredictorSnapshotUsesStoredEmailAsLabel pins the shared identity
+// contract: the predictor labels an account with the same mailbox the quota
+// page already synced into its auth file, without spending an upstream call.
+func TestFetchPredictorSnapshotUsesStoredEmailAsLabel(t *testing.T) {
+	const email = "predictor@example.test"
+	m, f := newTestManager(predictorIdentityResponder(email, ""))
+	m.mu.Lock()
+	m.cfg = mustTestConfig(t)
+	m.mu.Unlock()
+
+	snap, err := m.fetchPredictorSnapshot(context.Background(), testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Label != email {
+		t.Fatalf("label = %q, want the stored account email %q", snap.Label, email)
+	}
+	for _, call := range f.callsOf(pluginabi.MethodHostHTTPDo) {
+		var wire hostHTTPReq
+		_ = json.Unmarshal(call.payload, &wire)
+		if strings.Contains(wire.URL, "/alpha/whoami") {
+			t.Fatalf("stored email must not trigger a whoami call: %s", wire.URL)
+		}
+	}
+}
+
+// TestFetchPredictorSnapshotFallsBackToWhoamiIdentity covers accounts whose
+// email was never synced: the label falls back to the account identity the
+// quota page uses, preferring email, then the handle/display name, then org.
+func TestFetchPredictorSnapshotFallsBackToWhoamiIdentity(t *testing.T) {
+	m, _ := newTestManager(predictorIdentityResponder("", `{"success":true,"user":{"name":"Test User","userName":"test-user"},"org":null}`))
+	m.mu.Lock()
+	m.cfg = mustTestConfig(t)
+	m.mu.Unlock()
+
+	snap, err := m.fetchPredictorSnapshot(context.Background(), testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Label != "test-user" {
+		t.Fatalf("label = %q, want the account handle", snap.Label)
+	}
+}
+
+// TestFetchPredictorSnapshotReadsWhoamiDataWrapper keeps the identity parser
+// robust to the response envelope changing between CommandCode releases.
+func TestFetchPredictorSnapshotReadsWhoamiDataWrapper(t *testing.T) {
+	m, _ := newTestManager(predictorIdentityResponder("", `{"data":{"user":{"userName":"wrapped"},"org":{"login":"team"}}}`))
+	m.mu.Lock()
+	m.cfg = mustTestConfig(t)
+	m.mu.Unlock()
+
+	snap, err := m.fetchPredictorSnapshot(context.Background(), testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Label != "team (wrapped)" {
+		t.Fatalf("label = %q, want the wrapped org/account identity", snap.Label)
+	}
+}
+
+// TestBuildPredictorSeedsAccountEmailLabels keeps the prediction page from
+// showing the digest placeholder between an engine start and its first sample:
+// the mailbox already present in the auth file becomes the initial key label.
+func TestBuildPredictorSeedsAccountEmailLabels(t *testing.T) {
+	const email = "seeded@example.test"
+	m, _ := newTestManager(predictorIdentityResponder(email, ""))
+	cfg := mustTestConfig(t)
+
+	engine := m.buildPredictor(context.Background(), cfg)
+	if engine == nil {
+		t.Fatal("predictor engine disabled")
+	}
+	snap := engine.Snapshot(nil)
+	if len(snap.Accounts) != 1 || snap.Accounts[0].Label != email {
+		t.Fatalf("accounts = %+v, want the seeded email label", snap.Accounts)
+	}
+}
 
 // TestFetchPredictorSnapshotMapping pins the D12 mapping: the monthly plan
 // window (remaining/cap/period-end) lands in Included, the rolling

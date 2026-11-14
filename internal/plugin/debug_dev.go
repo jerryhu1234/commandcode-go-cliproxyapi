@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"commandcode-go-cliproxyapi/internal/errclass"
 )
 
 func debugBodyMeta(body []byte) string {
@@ -46,6 +48,11 @@ func debugTrace(format string, args ...any) {
 		return
 	}
 	defer f.Close()
-	values := append([]any{time.Now().Format(time.RFC3339Nano)}, args...)
-	_, _ = fmt.Fprintf(f, "%s "+format+"\n", values...)
+	// Sink-side redaction (FR-011 defense in depth): debug trace callers
+	// log control flow and metadata, but raw error values (network
+	// failures, upstream echo bodies) can carry credential material —
+	// every line passes through the shared Redact kernel before hitting
+	// disk, and non-secret metadata (ints, bools, digests) is unchanged.
+	msg := fmt.Sprintf(format, args...)
+	_, _ = f.WriteString(time.Now().Format(time.RFC3339Nano) + " " + errclass.Redact(msg) + "\n")
 }

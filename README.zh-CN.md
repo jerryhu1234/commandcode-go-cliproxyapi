@@ -41,7 +41,7 @@ CommandCode Go/GOAT/Pro/Max 通过它的 OpenAI 兼容入口访问：
 ## 功能
 
 - **单一 Provider 命名空间**：模型形如 `commandcode/deepseek/deepseek-v4.1-flash`、`commandcode/z-ai/glm-5.3-flash`（前缀可配置，也可关闭而直接使用上游裸 id）。
-- **多协议客户端翻译**：OpenAI Chat Completions、Anthropic Messages、OpenAI Responses 三种请求会转到选定的上游路由，响应（含流式）再转回来。Responses 默认使用 Chat fallback；显式的模型级 `protocol: responses` 覆盖项才调用原生 `/v1/responses`。
+- **多协议客户端翻译**：OpenAI Chat Completions、Anthropic Messages、OpenAI Responses 三种请求会转到选定的上游路由，响应（含流式）再转回来。默认按模型目录的 `supported_endpoints` 选上游，优先使用原生 Responses；显式模型级路由覆盖优先于自动选择。
 - **思考内容保真**：把上游的 `reasoning`、`reasoning_details[].text`、`reasoning_content` 归一化到各目标格式：
   - Claude 客户端：前置一个 `thinking` 块 + `thinking_delta` 事件；
   - Responses 客户端：前置一个 `reasoning` output item + `response.reasoning_summary_*` 事件；
@@ -113,8 +113,9 @@ plugins:
       # strict 会在上游调用前拒绝无法保真的有状态/托管语义。
       responses-compatibility: "cpa"     # cpa | strict
 
-       # 按模型显式声明能力（不会自动探测）；原生 Responses
-       # 不适用下面的 responses-compatibility 策略。
+       # 可选：强制单个模型的上游路由；默认按目录 supported_endpoints
+       # 优先选择 Responses，其次 Chat Completions、Messages。
+       # 原生 Responses 不适用下面的 responses-compatibility 策略。
        route-overrides:
          "native-responses-model":
            protocol: "responses"           # chat-completions | messages | responses
@@ -127,6 +128,7 @@ plugins:
       stream-finish-grace: "15s"
       max-response-bytes: 67108864        # 64 MiB
       allow-http: false                   # 本地测试允许 http://
+      debug-tool-args-dump: false         # 临时诊断:工具参数校验失败时转储累积参数
 ```
 
 ### 配置项
@@ -142,7 +144,7 @@ plugins:
 | `catalog.stale-while-unavailable` | `bool` | `true` | 刷新失败时继续提供上一份有效目录。 |
 | `protocols.*` | `bool` | `true` | 路由总开关；关闭的协议会带着诊断信息排除其模型。 |
 | `responses-compatibility` | `string` | `cpa` | `cpa` 对齐 CPA v7.3.15 的降级规则；`strict` 在上游调用前拒绝不支持或有状态的 Responses 语义。 |
-| `route-overrides` | `map` | `{}` | `{ 模型: { protocol, endpoint } }`，显式把模型固定到其他上游路由，不会自动探测能力。`responses` 覆盖项调用原生 `/v1/responses` 且不适用 `responses-compatibility`；未配置时 Responses 使用 Chat fallback。`endpoint` 必填。 |
+| `route-overrides` | `map` | `{}` | `{ 模型: { protocol, endpoint } }`，显式覆盖目录路由，优先级最高。未覆盖时按 `supported_endpoints` 优先选 Responses、Chat Completions、Messages；缺字段的旧目录保留 Chat fallback。`responses` 路由调用原生 `/v1/responses` 且不适用 `responses-compatibility`。`endpoint` 必填。 |
 | `request-timeout` | `duration` | `5m` | 上游 HTTP 超时（配额/账号请求另按 30s 上限）。 |
 | `stream-first-data-timeout` | `duration` | `60s` | 从打开流开始等待首次有意义协议进展的上限。 |
 | `stream-idle-timeout` | `duration` | `3m` | 仅有意义进展续期；ping、注释和重复帧不续期。 |
@@ -150,6 +152,7 @@ plugins:
 | `stream-finish-grace` | `duration` | `15s` | finish 后等待 usage/DONE 并安全结束的最长时间。 |
 | `max-response-bytes` | `int64` | `67108864` | 非流式响应体上限。 |
 | `allow-http` | `bool` | `false` | 允许 `http://` 上游,仅供本地测试。 |
+| `debug-tool-args-dump` | `bool` | `false` | *临时诊断*：终端工具参数校验失败时，把累积的工具调用参数（`CCDBG` 行）追加到宿主二进制旁的 `commandcode-toolargs.log`，用于判定参数残缺来自上游载荷还是插件聚合。生产环境保持关闭。 |
 | `predictor.enabled` | `bool` | `true` | 用量预测采样器(预测页的数据引擎)。 |
 | `predictor.sample-interval` | `duration` | `10m` | 采样节奏(最小 `2m`)。 |
 | `predictor.budget-per-minute` | `int` | `8` | 每分钟账号接口全局调用预算(1–10)。 |

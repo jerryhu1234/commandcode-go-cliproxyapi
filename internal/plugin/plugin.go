@@ -10,9 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
+	"commandcode-go-cliproxyapi/internal/adapter/shared"
 	"commandcode-go-cliproxyapi/internal/buildinfo"
 	"commandcode-go-cliproxyapi/internal/catalog"
 	"commandcode-go-cliproxyapi/internal/config"
@@ -191,7 +192,7 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 
 // lifecycleRequest mirrors rpcLifecycleRequest: config_yaml is base64.
 // The request's schema_version is decoded-and-ignored; registration echoes
-// pluginabi.SchemaVersion.
+// registeredSchemaVersion below.
 type lifecycleRequest struct {
 	ConfigYAML []byte `json:"config_yaml"`
 }
@@ -213,10 +214,19 @@ type registrationResult struct {
 	Capabilities  capabilities       `json:"capabilities"`
 }
 
+// registeredSchemaVersion pins the RPC contract this plugin negotiates with
+// the host. It deliberately does NOT track pluginabi.SchemaVersion: from CPA
+// v8 the SDK constant jumped 6→10, and pinning here keeps the wire behaviour
+// frozen on the schema 6 contract the plugin was built and tested against
+// (the v8 host accepts plugin schema versions ≤ its own and degrades
+// gracefully). Bump only together with a deliberate re-verification of every
+// host↔plugin surface (registration, executor, auth parse, quota, streams).
+const registeredSchemaVersion uint32 = 6
+
 func registrationEnvelope() []byte {
 	formats := []string{"openai", "claude", "openai-response"}
 	return okEnvelope(registrationResult{
-		SchemaVersion: pluginabi.SchemaVersion,
+		SchemaVersion: registeredSchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             pluginName,
 			Version:          buildinfo.Version,
@@ -303,6 +313,9 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 		debugTrace("lifecycle config_error=%s", err.Error())
 		return ErrEnvelope("invalid_config", err.Error()), nil
 	}
+	// TEMP DIAGNOSTIC: apply the tool-args guard dump switch (and turn the
+	// sink back off when reconfigure removes it) with an auto-resolved path.
+	shared.SetToolArgsDump(cfg.DebugToolArgsDump, "")
 	m.lifeMu.Lock()
 	defer m.lifeMu.Unlock()
 	debugTrace("lifecycle config_loaded key_count=%d prefix_enabled=%t prefix=%s", len(cfg.APIKeys), cfg.ModelPrefix.Enabled, cfg.ModelPrefix.Value)
@@ -311,6 +324,7 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	if err := m.materializeAuthRecords(ctx, cfg); err != nil {
 		return ErrEnvelope("auth_materialization_failed", err.Error()), nil
 	}
+	m.reportOrphanedAuthRecords(ctx, cfg)
 	// A nil *HostBridge must not enter the interface as a typed nil, or
 	// catalog's nil-client guard never fires and Refresh panics inside Do.
 	var client catalog.HostClient
@@ -318,7 +332,11 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 		client = m.bridge
 	}
 	mgr := catalog.New(cfg, client)
-	refreshErr := refreshOnce(context.Background(), mgr, m.bridge, registerRefreshTimeout, cfg)
+	// Reuse the lifecycle ctx (not a second Background budget): the register
+	// timeout bounds the synchronous work as a whole; handing refreshOnce a
+	// fresh budget silently allowed 2x registerRefreshTimeout and, worse,
+	// left the predictor build below consuming an already-spent deadline.
+	refreshErr := refreshOnce(ctx, mgr, m.bridge, registerRefreshTimeout, cfg)
 	debugTrace("lifecycle refresh_complete model_count=%d refresh_error=%t", len(mgr.Models()), refreshErr != nil)
 
 	// Retire any running loop and wait for its exit outside m.mu: a mid-refresh
@@ -356,7 +374,11 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	// config here — after the refresh loop settles so their starts
 	// interleave cleanly. The retired engine stops with a bounded join; its
 	// final flush runs once its loops have exited, before the swap returns.
-	pred := m.buildPredictor(cfg)
+	// A FRESH context: the lifecycle ctx spent its budget on materialization
+	// and the refresh, and buildPredictor's synchronous email-label reads
+	// would bail immediately on a expired deadline (engine goroutines build
+	// their own contexts in Start).
+	pred := m.buildPredictor(context.Background(), cfg)
 	if old := m.swapPredictor(pred); old != nil {
 		old.Stop()
 		old.WaitStopped(predictorStopTimeout)
@@ -376,10 +398,50 @@ func authKeyHash(key string) string {
 }
 
 // authRecordIDFromHash and authFileNameFromHash are the runtime auth ID and the
-// auth file name for one key digest. Both derive from the digest alone so every
-// producer agrees without recomputing it.
+// auth file name for one key digest. Both derive from the digest alone so every// producer agrees without recomputing it.
 func authRecordIDFromHash(hash string) string { return ProviderID + "-key-" + hash }
 func authFileNameFromHash(hash string) string { return authRecordIDFromHash(hash) + ".json" }
+
+// reportOrphanedAuthRecords surfaces the dead-credential surface (L0
+// diagnostic): the host routes requests to every materialized auth entry —
+// the executor takes the upstream key from the selected auth's attributes,
+// not from config — so a config-removed key's file keeps being a routeable
+// credential until an operator deletes it by hand. There is no
+// host.auth.delete ABI yet, so this is report-only: once per lifecycle,
+// CommandCode-pattern files whose digest is not in the config are logged by
+// digest (digest-only fields, FR-011). Best-effort: AuthList failure is
+// skipped silently, never blocking the lifecycle.
+func (m *Manager) reportOrphanedAuthRecords(ctx context.Context, cfg config.Config) {
+	if m.bridge == nil || (ctx != nil && ctx.Err() != nil) {
+		return
+	}
+	entries, err := m.bridge.AuthList(ctx)
+	if err != nil {
+		return
+	}
+	current := make(map[string]struct{}, len(cfg.APIKeys))
+	for _, k := range cfg.APIKeys {
+		current[authFileNameFromHash(authKeyHash(k.Value))] = struct{}{}
+	}
+	orphans := make([]string, 0, 1)
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Name)
+		if !strings.HasPrefix(name, ProviderID+"-key-") || !strings.HasSuffix(name, ".json") {
+			continue // foreign-provider or patternless entries are not ours
+		}
+		if _, ok := current[name]; ok {
+			continue
+		}
+		orphans = append(orphans,
+			strings.TrimSuffix(strings.TrimPrefix(name, ProviderID+"-key-"), ".json"))
+	}
+	if len(orphans) == 0 {
+		return
+	}
+	_ = m.bridge.Log("warn",
+		"orphaned commandcode auth files: keys removed from config still materialized as routeable credentials; operator delete or tombstone pending",
+		map[string]any{"digests": strings.Join(orphans, ", ")})
+}
 
 // materializeAuthRecords makes CPA-visible auth files idempotently. Existing
 // records are discovered through CPA so their host-managed metadata is never
@@ -403,6 +465,7 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 			existing[id] = struct{}{}
 		}
 	}
+	var attempts, failures int
 	for _, key := range cfg.APIKeys {
 		hash := authKeyHash(key.Value)
 		id := authRecordIDFromHash(hash)
@@ -422,16 +485,27 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 			Type: ProviderID, ID: id, Label: "CommandCode credential " + hash, APIKey: key.Value,
 		})
 		if err != nil {
-			return fmt.Errorf("build auth record")
+			return fmt.Errorf("build auth record: %w", err)
 		}
+		// Per-key best-effort: one poisoned or host-failing key must not
+		// fail the whole registration (advertised models would disappear
+		// everywhere). The failure is logged for the operator; registration
+		// still fails — as before — when every configured key fails to save.
+		attempts++
 		if err := m.bridge.AuthSave(ctx, pluginapi.HostAuthSaveRequest{
 			Name: name, JSON: record,
 		}); err != nil {
-			return err
+			failures++
+			_ = m.bridge.Log("warn", "auth record materialization failed for key",
+				map[string]any{"target": name, "error": err.Error()})
+			continue
 		}
 		existing[id] = struct{}{}
 		existing[name] = struct{}{}
 		debugTrace("auth materialized id=%s file=%s", id, name)
+	}
+	if attempts > 0 && failures == attempts {
+		return fmt.Errorf("all %d auth record saves failed", attempts)
 	}
 	return nil
 }
@@ -549,20 +623,32 @@ func (m *Manager) closeStop() chan struct{} {
 	return done
 }
 
-// refreshOnce runs one bounded catalog refresh. Catalog refresh is not a client
-// request, so the fallback uses the first configured key only and has no client
-// selection, rotation, cooldown, or retry state. parent bounds-and-cancels
-// the attempt: the lifecycle path passes context.Background() plus
-// registerRefreshTimeout; ticker ticks pass the loop's stop-derived context
-// plus the full request-timeout, so close(stop) aborts an in-flight tick
-// (F4). On failure it logs a warn via host.log — error text is a redacted
-// category label from the catalog package, never key material (FR-011).
+// refreshOnce runs one bounded catalog refresh. Catalog refresh is not a
+// client request, so it has no client selection, cooldown or retry state —
+// but it does fail over across the configured keys: pinning the refresh to
+// APIKeys[0] alone left the model catalog stale forever once the first key
+// died. First success wins; per-key failures log a warn and try the next key.
+// parent bounds-and-cancels the attempt: the lifecycle path passes
+// context.Background() plus registerRefreshTimeout; ticker ticks pass the
+// loop's stop-derived context plus the full request-timeout, so close(stop)
+// aborts an in-flight tick (F4). On failure it logs a warn via host.log —
+// error text is a redacted category label from the catalog package, never
+// key material (FR-011).
 func refreshOnce(parent context.Context, mgr *catalog.Manager, bridge *HostBridge, timeout time.Duration, cfg config.Config) error {
 	// Fallback: configured materialization input is catalog-only; CPA client
 	// authentication remains owned by its AuthProvider and CPA.
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	err := mgr.Refresh(ctx, cfg.APIKeys[0].Value)
+	var err error
+	for _, key := range cfg.APIKeys {
+		if err = mgr.Refresh(ctx, key.Value); err == nil {
+			break
+		}
+		if bridge != nil && len(cfg.APIKeys) > 1 {
+			_ = bridge.Log("warn", "catalog refresh failed with key; trying next configured key",
+				map[string]any{"error": err.Error()})
+		}
+	}
 	if err != nil {
 		if bridge != nil {
 			_ = bridge.Log("warn", "catalog refresh failed", map[string]any{"error": err.Error()})
@@ -580,12 +666,24 @@ func refreshOnce(parent context.Context, mgr *catalog.Manager, bridge *HostBridg
 		if len(warnings) > 0 {
 			fields["warnings"] = strings.Join(warnings, "; ")
 		}
-		_ = bridge.Log("warn", "unsupported models excluded from routable catalog", fields)
+		logBridgeWarn(bridge, "unsupported models excluded from routable catalog", fields)
 	} else if len(warnings) > 0 {
-		_ = bridge.Log("warn", "catalog normalization warnings",
+		logBridgeWarn(bridge, "catalog normalization warnings",
 			map[string]any{"warnings": strings.Join(warnings, "; ")})
 	}
 	return nil
+}
+
+// logBridgeWarn emits a host.log warn, tolerating the nil bridge the
+// lifecycle deliberately supports — the failure-log paths already guard;
+// the diagnostics paths must too, or a successful register/reconfigure with
+// post-refresh diagnostics panics inside the bridge and surfaces as a
+// plugin_error through HandleCall's recover.
+func logBridgeWarn(bridge *HostBridge, message string, fields map[string]any) {
+	if bridge == nil {
+		return
+	}
+	_ = bridge.Log("warn", message, fields)
 }
 
 func okEnvelope(result any) []byte {

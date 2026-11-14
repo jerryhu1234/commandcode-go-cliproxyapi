@@ -340,6 +340,118 @@ func TestUpstreamStatusError(t *testing.T) {
 	}
 }
 
+func TestUpstreamStatusErrorPreservesProviderCodeAndClassifiesSpecialCases(t *testing.T) {
+	tests := []struct {
+		status int
+		body   string
+		code   string
+		class  errclass.Class
+		retry  bool
+	}{
+		{403, `{"error":{"code":"upgrade_required","message":"Upgrade your plan"}}`, "upgrade_required", errclass.ClassBilling, false},
+		{422, `{"error":{"code":"cmd_zdr_no_providers","message":"No ZDR provider"}}`, "cmd_zdr_no_providers", errclass.ClassUnsupported, false},
+		{400, `{"error":{"code":"unsupported_model","message":"Unknown model"}}`, "unsupported_model", errclass.ClassInvalidModel, false},
+		{400, `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}}`, "invalid_request_error", errclass.ClassUnsupported, false},
+		{400, `{"error":{"message":"Bad request"}}`, "", errclass.ClassUnsupported, false},
+		{400, `{"error":{"code":"BAD_REQUEST","type":"invalid_request_error","message":"Extra required field missing"}}`, "BAD_REQUEST", errclass.ClassUnsupported, false},
+		{400, `{"error":{"code":"BAD_REQUEST","type":"invalid_request_error","message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service."}}`, "insufficient_credits", errclass.ClassQuota, true},
+	}
+	for _, tc := range tests {
+		e := UpstreamStatusError(tc.status, []byte(tc.body))
+		if e.UpstreamCode != tc.code || e.Class != tc.class || e.Retryable != tc.retry {
+			t.Errorf("status %d: error = %+v", tc.status, e)
+		}
+		if strings.Contains(e.Message, `"error"`) {
+			t.Errorf("JSON envelope was not reduced to its message: %q", e.Message)
+		}
+	}
+
+	billed := UpstreamStatusError(400, []byte(`{"error":{"code":"BAD_REQUEST","type":"invalid_request_error","message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service."}}`))
+	if billed.StatusCode != 402 {
+		t.Errorf("billing-exhaustion status = %d, want 402", billed.StatusCode)
+	}
+	if !strings.Contains(billed.Message, "insufficient credits") || strings.Contains(billed.Message, "BAD_REQUEST") {
+		t.Errorf("billing-exhaustion message lost the upstream wording: %q", billed.Message)
+	}
+
+	secret := UpstreamStatusError(401, []byte(`{"error":{"code":"authentication_error","message":"invalid x-api-key sk-secret-123456789"}}`))
+	if strings.Contains(secret.Message, "sk-secret-123456789") || !strings.Contains(secret.Message, "[redacted]") {
+		t.Fatalf("provider error message leaked key: %q", secret.Message)
+	}
+}
+
+// TestBillingExhaustionRemapSurvivesCodeVariants pins the billing-exhaustion
+// classification to the status+message signature alone: the upstream may omit
+// error.code or send a different generic code for the same depleted account,
+// and the host-visible contract (402 / quota / rotation) must not depend on
+// the exact "BAD_REQUEST" code key.
+func TestBillingExhaustionRemapSurvivesCodeVariants(t *testing.T) {
+	const message = "You have insufficient credits to make this request. Please purchase more credits to continue using the service."
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"missing code", `{"error":{"type":"invalid_request_error","message":"` + message + `"}}`},
+		{"alternate code", `{"error":{"code":"credit_balance_too_low","type":"invalid_request_error","message":"` + message + `"}}`},
+	}
+	for _, tc := range tests {
+		e := UpstreamStatusError(400, []byte(tc.body))
+		if e.Class != errclass.ClassQuota || e.StatusCode != 402 ||
+			e.UpstreamCode != "insufficient_credits" || !e.Retryable {
+			t.Errorf("%s: classification = %+v, want quota/402/insufficient_credits/retryable", tc.name, e)
+		}
+	}
+}
+
+// TestUnsupportedModelKeepsHostModelSupportVocabulary makes an upstream
+// "unsupported_model" rejection visible to the host's model-support matcher:
+// the host keeps only the message text (dropping provider codes) and requires
+// one of its vocabulary patterns ("unsupported model" among them) to route
+// the failure to the per-model state instead of penalizing the credential.
+func TestUnsupportedModelKeepsHostModelSupportVocabulary(t *testing.T) {
+	e := UpstreamStatusError(400, []byte(`{"error":{"code":"unsupported_model","message":"Unknown model"}}`))
+	if e.Class != errclass.ClassInvalidModel {
+		t.Errorf("class = %v, want invalid model", e.Class)
+	}
+	lower := strings.ToLower(e.Message)
+	matched := strings.Contains(lower, "unsupported model") ||
+		strings.Contains(lower, "model not supported") ||
+		strings.Contains(lower, "model is not supported")
+	if !matched {
+		t.Errorf("message %q lost every host model-support vocabulary pattern", e.Message)
+	}
+}
+
+// TestCloudflareChallengeKeepsHostVocabulary pins Cloudflare-challenge
+// self-classification: the host routes 403 challenges to a short-backoff
+// cooldown branch, but only when the message carries its vocabulary — which
+// depends on challenge markers surviving the 80-char redacted snippet. A
+// challenge page puts "Just a moment..." deep in the HTML, so the snippet can
+// hold neither marker; the classification therefore inspects the FULL body
+// text and prefixes the host phrase without widening the snippet (FR-011).
+func TestCloudflareChallengeKeepsHostVocabulary(t *testing.T) {
+	// Marker "just a moment" sits past the 80-char snippet window.
+	body := `<html><head><title>Please wait 5 seconds while we verify your request</title>` +
+		`</head><body>Just a moment while we verify. Challenge platform loading.</body></html>`
+	e := UpstreamStatusError(403, []byte(body))
+	if e.Class != errclass.ClassUpstream || !e.Retryable || e.StatusCode != 403 {
+		t.Errorf("classification = %+v, want upstream/403/retryable", e)
+	}
+	lower := strings.ToLower(e.Message)
+	hostMatched := strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "cf-mitigated") ||
+		strings.Contains(lower, "cloudflare challenge") ||
+		(strings.Contains(lower, "just a moment") && strings.Contains(lower, "cloudflare"))
+	if !hostMatched {
+		t.Errorf("message %q lost every host cloudflare-challenge vocabulary pattern", e.Message)
+	}
+	// A plain 403 forbidden must not gain the challenge vocabulary.
+	plain := UpstreamStatusError(403, []byte(`{"error":{"message":"forbidden: policy violation"}}`))
+	if strings.Contains(strings.ToLower(plain.Message), "cloudflare challenge") {
+		t.Errorf("plain forbidden misclassified as challenge: %q", plain.Message)
+	}
+}
+
 func equalJSON(a, b any) bool {
 	ab, _ := json.Marshal(a)
 	bb, _ := json.Marshal(b)
@@ -382,6 +494,11 @@ func TestFunctionTool(t *testing.T) {
 
 func TestUnsupportedFormat(t *testing.T) {
 	eErr := UnsupportedFormat("grpc", "/v1/responses")
+	// 422 keeps the failure request-scoped on the host: status-0 errors map
+	// to 500 there and cool/rotate a credential for a client-body problem.
+	if eErr.StatusCode != 422 {
+		t.Errorf("UnsupportedFormat status = %d, want 422", eErr.StatusCode)
+	}
 	if eErr == nil || eErr.Class != errclass.ClassUnsupported ||
 		eErr.Message != `source protocol "grpc" cannot be translated to /v1/responses` {
 		t.Fatalf("err = %+v", eErr)
@@ -864,6 +981,7 @@ func TestResponseStatusInverseKernels(t *testing.T) {
 
 	eErr := UnsupportedPartType("audio", "/v1/chat/completions")
 	if eErr == nil || eErr.Class != errclass.ClassUnsupported ||
+		eErr.StatusCode != 422 ||
 		eErr.Message != `unsupported content block type "audio" for /v1/chat/completions` {
 		t.Errorf("UnsupportedPartType = %v", eErr)
 	}
@@ -984,7 +1102,7 @@ func TestOutputAssembler(t *testing.T) {
 			},
 			want: []any{
 				msgItem("m", ""),
-				RespItem{Type: "function_call", CallID: "c1", Name: "f", Arguments: "{}"},
+				RespItem{Type: "function_call", ID: "fc_c1", CallID: "c1", Name: "f", Arguments: "{}"},
 			},
 		},
 		{
@@ -996,9 +1114,9 @@ func TestOutputAssembler(t *testing.T) {
 				a.AddText("hi")
 			},
 			want: []any{
-				RespItem{Type: "function_call", CallID: "c1", Name: "f"},
+				RespItem{Type: "function_call", ID: "fc_c1", CallID: "c1", Name: "f"},
 				msgItem("m", "hi"),
-				RespItem{Type: "function_call", CallID: "c2", Name: "g"},
+				RespItem{Type: "function_call", ID: "fc_c2", CallID: "c2", Name: "g"},
 			},
 		},
 		{
@@ -1011,7 +1129,7 @@ func TestOutputAssembler(t *testing.T) {
 			},
 			want: []any{
 				msgItem("m", "t"),
-				RespItem{Type: "function_call", CallID: "c1", Name: "f"},
+				RespItem{Type: "function_call", ID: "fc_c1", CallID: "c1", Name: "f"},
 			},
 		},
 		{
@@ -1022,7 +1140,7 @@ func TestOutputAssembler(t *testing.T) {
 			},
 			want: []any{
 				msgItem("m", "t"),
-				RespItem{Type: "function_call", CallID: "c1", Name: "f"},
+				RespItem{Type: "function_call", ID: "fc_c1", CallID: "c1", Name: "f"},
 			},
 		},
 		{
@@ -1494,5 +1612,22 @@ func TestDecodeClaudeMessages(t *testing.T) {
 		if eErr == nil || eErr.Class != errclass.ClassTranslation {
 			t.Errorf("%s: want ClassTranslation, got %+v", name, eErr)
 		}
+	}
+}
+
+// Pinned upstream-v0.1.3 convention: every synthesized function_call item
+// id carries the fc_ prefix — clients that keep only fc_ ids otherwise
+// record the item id as missing and never finish streamed calls. The
+// result depends only on callID so stream announcements, terminal output,
+// and the non-stream converter stay identical.
+func TestFunctionCallItemID(t *testing.T) {
+	if got := FunctionCallItemID(""); got != "fc_0" {
+		t.Errorf("empty callID = %q, want fc_0", got)
+	}
+	if got := FunctionCallItemID("call_abc"); got != "fc_call_abc" {
+		t.Errorf("plain callID = %q, want fc_call_abc", got)
+	}
+	if got := FunctionCallItemID("fc_already"); got != "fc_already" {
+		t.Errorf("prefixed callID must pass through, got %q", got)
 	}
 }

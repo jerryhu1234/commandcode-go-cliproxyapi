@@ -286,7 +286,7 @@ func TestFunctionStreamNameAndPendingArgumentFragments(t *testing.T) {
 				joined.Write(event)
 			}
 			s := joined.String()
-			if strings.Count(s, `"arguments":"","call_id":"c","name":"sum","type":"function_call"`) != 1 {
+			if strings.Count(s, `"arguments":"","call_id":"c","id":"fc_c","name":"sum","type":"function_call"`) != 1 {
 				t.Fatalf("opening item name changed or duplicated: %s", s)
 			}
 			if strings.Contains(s, `"name":"s"`) || strings.Contains(s, `"name":"sumsum"`) {
@@ -301,14 +301,14 @@ func TestFunctionStreamNameAndPendingArgumentFragments(t *testing.T) {
 				if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &raw) != nil {
 					continue
 				}
-				if raw["type"] == "response.function_call_arguments.delta" && raw["item_id"] == "c" {
+				if raw["type"] == "response.function_call_arguments.delta" && raw["item_id"] == "fc_c" {
 					deltas.WriteString(raw["delta"].(string))
 				}
 			}
 			if deltas.String() != `{"x":1}` {
 				t.Fatalf("pending/current argument bytes = %q, want complete ordered arguments; stream=%s", deltas.String(), s)
 			}
-			if !strings.Contains(s, `"type":"function_call","call_id":"c","name":"sum","arguments":"{\"x\":1}"`) {
+			if !strings.Contains(s, `"type":"function_call","id":"fc_c","call_id":"c","name":"sum","arguments":"{\"x\":1}"`) {
 				t.Fatalf("completed output mismatch: %s", s)
 			}
 		})

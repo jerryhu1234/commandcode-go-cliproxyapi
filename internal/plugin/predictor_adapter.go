@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/predictor"
 )
@@ -102,6 +102,17 @@ func (m *Manager) fetchPredictorSnapshot(ctx context.Context, key string) (predi
 		return predictor.AccountSnapshot{}, err
 	}
 	id, label := quotaIdentity(key)
+	// Prefer the mailbox already synced into the credential's auth file: it
+	// is the same label the quota page shows and costs no upstream call. A
+	// credential that was never refreshed falls back to whoami, which also
+	// carries the handle/display name for accounts that report no email.
+	if stored := m.accountEmails(ctx); stored[id] != "" {
+		label = stored[id]
+	} else if rawWho, errWho := m.accountGet(ctx, base, key, accountWhoamiPath); errWho == nil {
+		if identity := accountIdentityFromWhoami(rawWho); identity.Label() != "" {
+			label = identity.Label()
+		}
+	}
 	snap := predictor.AccountSnapshot{
 		KeyID: id, Label: label, At: time.Now().UTC(), PurchasedUSD: -1,
 	}

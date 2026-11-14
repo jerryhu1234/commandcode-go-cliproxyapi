@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -897,7 +898,8 @@ func (e ResponsesEventEmitter) InProgress() []byte {
 
 // ItemAdded announces one output item before its first delta; item carries
 // the block-type-specific fields (message id/role/content, or function_call
-// call_id/name/arguments per the canonical call_id-only shape).
+// id/call_id/name/arguments, where the id is the fc_-prefixed item id the
+// client binds deltas and done events by).
 func (e ResponsesEventEmitter) ItemAdded(outputIndex int, item map[string]any) []byte {
 	return e.event("response.output_item.added", map[string]any{
 		"type": "response.output_item.added", "output_index": outputIndex, "item": item,
@@ -1032,6 +1034,22 @@ func RedactedSnippet(s string) string {
 // truncates to this size before scanning (FR-011).
 const snippetBound = 4096
 
+// isCloudflareChallengeText is the plugin's own minimal challenge detector:
+// a 403 whose body carries a Cloudflare challenge marker ("just a moment" —
+// the canonical challenge-page title — "challenge-platform", "cf-mitigated",
+// or "attention required"). It is intentionally broader than the host's
+// matcher: the classifier prefixes the message with "cloudflare challenge",
+// which is itself a host-recognized vocabulary phrase, so any body that
+// looks like a challenge routes the host to its short-backoff branch even
+// when the body never names Cloudflare.
+func isCloudflareChallengeText(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "cf-mitigated") ||
+		strings.Contains(lower, "just a moment") ||
+		strings.Contains(lower, "attention required")
+}
+
 // UpstreamStatusError classifies an upstream >=400 response body into one
 // kernel used by every adapter and the executor: the body is truncated to
 // its head before redacted-snippet extraction, then classified per §7 via
@@ -1041,7 +1059,136 @@ func UpstreamStatusError(status int, body []byte) *errclass.Error {
 	if len(body) > snippetBound {
 		body = body[:snippetBound]
 	}
-	return errclass.FromStatus(status, RedactedSnippet(string(body)))
+	code, message := upstreamErrorDetails(body)
+	if message == "" {
+		message = string(body)
+	}
+	return ClassifyUpstreamError(status, code, message)
+}
+
+// ClassifyUpstreamError classifies an upstream protocol error while retaining
+// a safe provider code for the executor envelope.
+func ClassifyUpstreamError(status int, code, message string) *errclass.Error {
+	if !safeUpstreamErrorCode(code) {
+		code = ""
+	}
+	e := errclass.FromStatus(status, RedactedSnippet(message))
+	e.UpstreamCode = code
+	// Cloudflare-challenge self-classification: the host routes HTTP 403
+	// challenges (isCloudflareChallengeResultError) into its short-backoff
+	// cooldown branch, but only when the message carries its vocabulary —
+	// and a challenge page puts its markers ("Just a moment...",
+	// "challenge-platform") deep in the HTML, past the 80-char redacted
+	// snippet. Inspect the FULL upstream message here (classification is
+	// the only boundary that still holds it), then prefix the host phrase
+	// onto the snippet without widening it (FR-011). Plain 403s keep the
+	// default auth-failure treatment.
+	if status == http.StatusForbidden && isCloudflareChallengeText(message) &&
+		!strings.Contains(strings.ToLower(e.Message), "cloudflare challenge") {
+		e.Class = errclass.ClassUpstream
+		e.Retryable = true
+		e.Message = "cloudflare challenge: " + e.Message
+	}
+	// Billing exhaustion (FR-billing): any 400 whose message carries the
+	// "insufficient credits" billing wording is re-exposed as 402 — the status
+	// both v7 and v8 host generations cooldown (30 min) and rotate across. The
+	// signature intentionally ignores the provider code key: the upstream has
+	// been observed with code "BAD_REQUEST", with no code at all, and generic
+	// invalid_request_error bodies for the same depleted-account condition,
+	// and the host drops provider codes anyway (only message + status reach
+	// MarkResult). The 30-minute heartbeat doubles as top-up detection:
+	// purchasing credits revives the account within one cooldown window.
+	if status == http.StatusBadRequest &&
+		strings.Contains(strings.ToLower(message), "insufficient credits") {
+		e.Class = errclass.ClassQuota
+		e.StatusCode = http.StatusPaymentRequired
+		e.UpstreamCode = "insufficient_credits"
+		e.Retryable = true
+		return e
+	}
+	switch code {
+	case "unsupported_model":
+		e.Class = errclass.ClassInvalidModel
+		// The host keeps only the message text and routes model-support
+		// failures through its vocabulary matcher ("unsupported model", …);
+		// feed the pattern verbatim so the failure lands in the per-model
+		// state path instead of being treated as a credential-request fault.
+		if !strings.Contains(strings.ToLower(e.Message), "unsupported model") {
+			e.Message = "unsupported model: " + e.Message
+		}
+	case "upgrade_required":
+		e.Class = errclass.ClassBilling
+		e.Retryable = false
+	case "cmd_zdr_no_providers":
+		e.Class = errclass.ClassUnsupported
+		e.Retryable = false
+	case "invalid_request_error":
+		e.Class = errclass.ClassUnsupported
+		e.Retryable = false
+	case "authentication_error":
+		e.Class = errclass.ClassAuth
+	case "rate_limit_error":
+		e.Class = errclass.ClassRateLimit
+		e.Retryable = true
+	case "server_error", "api_error", "overloaded_error":
+		if status >= 500 {
+			e.Class = errclass.ClassUpstream
+			e.Retryable = true
+		}
+	}
+	return e
+}
+
+func upstreamErrorDetails(body []byte) (code, message string) {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(body, &root) != nil || root == nil {
+		return "", ""
+	}
+	stringField := func(fields map[string]json.RawMessage, key string) string {
+		var value string
+		if raw, ok := fields[key]; ok {
+			_ = json.Unmarshal(raw, &value)
+		}
+		return strings.TrimSpace(value)
+	}
+	nested := map[string]json.RawMessage(nil)
+	if raw := root["error"]; len(raw) > 0 {
+		_ = json.Unmarshal(raw, &nested)
+	}
+	message = stringField(nested, "message")
+	if message == "" {
+		message = stringField(root, "message")
+	}
+	code = stringField(nested, "code")
+	if code == "" {
+		code = stringField(root, "code")
+	}
+	if code == "" {
+		code = stringField(nested, "type")
+	}
+	if code == "" {
+		code = stringField(root, "type")
+		if code == "error" {
+			code = ""
+		}
+	}
+	if !safeUpstreamErrorCode(code) {
+		code = ""
+	}
+	return code, message
+}
+
+func safeUpstreamErrorCode(code string) bool {
+	if len(code) == 0 || len(code) > 80 {
+		return false
+	}
+	for _, r := range code {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 // ResponsesUsage is the token-usage block of synthesized Responses
@@ -1283,8 +1430,9 @@ func (r *ResponsesRequest) DecodeInputItems() ([]RespItem, *errclass.Error) {
 // or function_call_output). ID carries the item identity of synthesized
 // terminal message items (FR-006 sibling parity: the Chat Completions
 // and Messages routes emit the same "id" the streaming
-// response.output_item.added announcement used); function_call items stay
-// call_id-only per the documented canonical shape.
+// response.output_item.added announcement used); synthesized function_call
+// items also carry the fc_-prefixed id (FunctionCallItemID) so clients
+// that keep only fc_ ids can still bind the call.
 type RespItem struct {
 	Type      string          `json:"type"`
 	ID        string          `json:"id,omitempty"`
@@ -1892,8 +2040,12 @@ func OpenAIImageURL(raw json.RawMessage) (string, *errclass.Error) {
 // adapter handles, naming the target endpoint.
 func UnsupportedFormat(format, target string) *errclass.Error {
 	return &errclass.Error{
-		Class:   errclass.ClassUnsupported,
-		Message: fmt.Sprintf("source protocol %q cannot be translated to %s", format, target),
+		Class: errclass.ClassUnsupported,
+		// 422: the request body uses a source protocol the target endpoint
+		// cannot represent — request-scoped, so the host must exempt it
+		// from credential cooldown/rotation.
+		StatusCode: 422,
+		Message:    fmt.Sprintf("source protocol %q cannot be translated to %s", format, target),
 	}
 }
 
@@ -1901,8 +2053,12 @@ func UnsupportedFormat(format, target string) *errclass.Error {
 // endpoint cannot represent (ClassUnsupported; FR-005 explicit policy).
 func UnsupportedPartType(partType, target string) *errclass.Error {
 	return &errclass.Error{
-		Class:   errclass.ClassUnsupported,
-		Message: fmt.Sprintf("unsupported content block type %q for %s", partType, target),
+		Class: errclass.ClassUnsupported,
+		// 422: a client content-block/part type the endpoint cannot
+		// represent is request-scoped; an explicit status keeps the host
+		// from reading it as a 500 credential failure.
+		StatusCode: 422,
+		Message:    fmt.Sprintf("unsupported content block type %q for %s", partType, target),
 	}
 }
 
@@ -2028,6 +2184,22 @@ func (a *OutputAssembler) AddText(fragment string) {
 	a.text.WriteString(fragment)
 }
 
+// FunctionCallItemID returns the Responses item id for a synthesized
+// function_call. Clients such as Pi keep only ids with an fc_ prefix and
+// otherwise record the item id as missing, so every synthesized call gets
+// that prefix while it keeps its original call_id. The result depends only
+// on callID so stream announcements, terminal output, and the non-stream
+// converter stay identical (ported from upstream v0.1.3).
+func FunctionCallItemID(callID string) string {
+	if strings.HasPrefix(callID, "fc_") {
+		return callID
+	}
+	if callID == "" {
+		return "fc_0"
+	}
+	return "fc_" + callID
+}
+
 // AppendFunctionCall adds one function_call item in arrival order;
 // arguments pass through verbatim — callers apply the absent-arguments
 // policy themselves.
@@ -2040,7 +2212,7 @@ func (a *OutputAssembler) AppendFunctionCall(callID, name, args string) {
 // call_id, which may be empty or repeated in upstream output.
 func (a *OutputAssembler) AppendFunctionCallWithNamespace(callID, name, namespace, args string) {
 	a.items = append(a.items, RespItem{
-		Type: "function_call", CallID: callID, Name: name, Namespace: namespace, Arguments: args,
+		Type: "function_call", ID: FunctionCallItemID(callID), CallID: callID, Name: name, Namespace: namespace, Arguments: args,
 	})
 }
 

@@ -169,6 +169,8 @@ type usageCounts struct {
 }
 
 type errorMessage struct {
+	Code    string `json:"code"`
+	Type    string `json:"type"`
 	Message string `json:"message"`
 }
 
@@ -212,6 +214,8 @@ type terminalEvent struct {
 
 type failureEvent struct {
 	StatusCode float64      `json:"status_code"`
+	Code       string       `json:"code"`
+	Type       string       `json:"type"`
 	Message    string       `json:"message"`
 	Response   responseMeta `json:"response"`
 }
@@ -638,8 +642,18 @@ func failureError(ev *failureEvent) *errclass.Error {
 	if msg == "" {
 		msg = ev.Response.Error.Message
 	}
+	code := ev.Code
+	if code == "" {
+		code = ev.Response.Error.Code
+	}
+	if code == "" {
+		code = ev.Type
+	}
+	if code == "" {
+		code = ev.Response.Error.Type
+	}
 	if status > 0 {
-		return errclass.FromStatus(status, msg)
+		return shared.ClassifyUpstreamError(status, code, msg)
 	}
 	return errclass.UpstreamFallback(msg)
 }

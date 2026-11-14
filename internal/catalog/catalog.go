@@ -18,7 +18,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/config"
 )
@@ -61,16 +61,17 @@ func routeFromString(s string) (Route, bool) {
 
 // ModelRecord is one routable normalized catalog entry (arch §7, FR-003).
 type ModelRecord struct {
-	PublicID     string
-	UpstreamID   string
-	DisplayName  string
-	Protocol     Route
-	EndpointPath string
-	ContextLimit int64
-	OutputLimit  int64
-	InputModes   []string
-	OutputModes  []string
-	Thinking     *pluginapi.ThinkingSupport
+	PublicID           string
+	UpstreamID         string
+	DisplayName        string
+	Protocol           Route
+	EndpointPath       string
+	SupportedEndpoints []string
+	ContextLimit       int64
+	OutputLimit        int64
+	InputModes         []string
+	OutputModes        []string
+	Thinking           *pluginapi.ThinkingSupport
 }
 
 // UnsupportedModel is a discovered model excluded from the routable set,
@@ -86,20 +87,21 @@ type HostClient interface {
 	Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error)
 }
 
-// rawModel tolerantly decodes one catalog entry; unknown fields —
-// including protocol/endpoint fields the catalog does not provide and
-// reasoning/tool_calling flags the plugin does not act on — are ignored via
-// json tags. Modality metadata accepts both spellings.
+// rawModel tolerantly decodes one catalog entry; unknown fields — including
+// model capabilities the plugin does not act on — are ignored via json tags.
+// Modality metadata accepts both spellings; supported_endpoints selects the
+// provider route when present.
 type rawModel struct {
-	ID               string       `json:"id"`
-	DisplayName      string       `json:"display_name"`
-	ContextLength    int64        `json:"context_length"`
-	MaxOutputTokens  int64        `json:"max_output_tokens"`
-	InputModes       []string     `json:"input_modes"`
-	OutputModes      []string     `json:"output_modes"`
-	InputModalities  []string     `json:"input_modalities"`
-	OutputModalities []string     `json:"output_modalities"`
-	Thinking         *rawThinking `json:"thinking"`
+	ID                 string       `json:"id"`
+	DisplayName        string       `json:"display_name"`
+	ContextLength      int64        `json:"context_length"`
+	MaxOutputTokens    int64        `json:"max_output_tokens"`
+	InputModes         []string     `json:"input_modes"`
+	OutputModes        []string     `json:"output_modes"`
+	InputModalities    []string     `json:"input_modalities"`
+	OutputModalities   []string     `json:"output_modalities"`
+	SupportedEndpoints *[]string    `json:"supported_endpoints"`
+	Thinking           *rawThinking `json:"thinking"`
 }
 
 // rawThinking tolerantly decodes the optional per-model thinking object;
@@ -114,16 +116,10 @@ type rawThinking struct {
 	Levels         []string `json:"levels"`
 }
 
-// DefaultRoute is the route every catalog model takes when no
-// route-override claims it (arch §5 amended for the Chat-Completions-only
-// upstream): CommandCode serves OpenAI/OSS models on /provider/v1/
-// chat/completions only — its /messages endpoint accepts Claude models and
-// rejects OSS ids with "Model \"<id>\" is not supported on this endpoint",
-// and /provider/v1/responses is not a registered route at all. Publishing
-// models on those routes would advertise ids that can only fail, so the
-// family-prefix compatibility table is replaced by a single default; a
-// deployment whose upstream really does serve another protocol can pin
-// individual models (or a family) back with route-overrides.
+// DefaultRoute is the compatibility route used only when a catalog entry
+// omits supported_endpoints and has no explicit route override. Current
+// CommandCode catalogs publish per-model endpoint support, which resolve
+// uses in preference to this fallback.
 const DefaultRoute = RouteChatCompletions
 
 // Manager owns the catalog snapshot. All accessors are safe for
@@ -261,7 +257,11 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			warns = append(warns, warn)
 		}
 		if !ok {
-			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: "no route determined"})
+			reason := warn
+			if reason == "" {
+				reason = "no route determined"
+			}
+			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: reason})
 			continue
 		}
 		if !m.protocolEnabled(route) {
@@ -297,16 +297,17 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			display = e.ID
 		}
 		rec := ModelRecord{
-			PublicID:     config.PublicID(m.cfg, e.ID),
-			UpstreamID:   e.ID,
-			DisplayName:  display,
-			Protocol:     route,
-			EndpointPath: endpoint,
-			ContextLimit: e.ContextLength,
-			OutputLimit:  e.MaxOutputTokens,
-			InputModes:   inputModes,
-			OutputModes:  outputModes,
-			Thinking:     normalizeThinking(e.Thinking),
+			PublicID:           config.PublicID(m.cfg, e.ID),
+			UpstreamID:         e.ID,
+			DisplayName:        display,
+			Protocol:           route,
+			EndpointPath:       endpoint,
+			SupportedEndpoints: supportedEndpoints(e.SupportedEndpoints),
+			ContextLimit:       e.ContextLength,
+			OutputLimit:        e.MaxOutputTokens,
+			InputModes:         inputModes,
+			OutputModes:        outputModes,
+			Thinking:           normalizeThinking(e.Thinking),
 		}
 		// With a prefix enabled, one record's PublicID can equal another
 		// record's UpstreamID (upstream "foo" and "commandcode/foo" both
@@ -351,10 +352,9 @@ func (m *Manager) protocolEnabled(r Route) bool {
 	return true
 }
 
-// resolve applies route priority strictly: user override, then the
-// Chat-Completions-only default (arch §5 as amended for CommandCode). A
-// catalog entry is therefore always routable; the protocol gates and the
-// endpoint-escape check still filter what reaches the model list.
+// resolve applies route priority: user override, then the catalog-declared
+// endpoint set (preferring Responses, Chat Completions, then Messages), then
+// the legacy Chat Completions fallback when endpoint metadata is absent.
 func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
 	if o, ok := m.cfg.RouteOverrides[e.ID]; ok {
 		// Spec 04 §5: an override MUST be visible in diagnostics. Load
@@ -363,7 +363,45 @@ func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
 		return Route(o.Protocol), o.Endpoint, true, fmt.Sprintf(
 			"model %q routed via user override (%s %s)", e.ID, o.Protocol, o.Endpoint)
 	}
+	if e.SupportedEndpoints != nil {
+		if route, ok := preferredSupportedRoute(*e.SupportedEndpoints); ok {
+			return route, "", true, ""
+		}
+		return "", "", false, fmt.Sprintf(
+			"model %q declares no supported endpoint recognized by this plugin", e.ID)
+	}
 	return DefaultRoute, "", true, ""
+}
+
+func supportedEndpoints(endpoints *[]string) []string {
+	if endpoints == nil {
+		return nil
+	}
+	return append([]string(nil), (*endpoints)...)
+}
+
+// preferredSupportedRoute matches the provider's endpoint suffixes (for
+// example "/responses") and accepts full "/v1/..." paths as well. Responses
+// is preferred whenever declared, followed by Chat Completions and Messages.
+func preferredSupportedRoute(endpoints []string) (Route, bool) {
+	supported := make(map[Route]bool, len(endpoints))
+	for _, endpoint := range endpoints {
+		path := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(endpoint)), "/")
+		switch path {
+		case "/responses", "/v1/responses":
+			supported[RouteResponses] = true
+		case "/chat/completions", "/v1/chat/completions":
+			supported[RouteChatCompletions] = true
+		case "/messages", "/v1/messages":
+			supported[RouteMessages] = true
+		}
+	}
+	for _, route := range []Route{RouteResponses, RouteChatCompletions, RouteMessages} {
+		if supported[route] {
+			return route, true
+		}
+	}
+	return "", false
 }
 
 // JoinUpstreamURL joins the configured base-url onto an endpoint path and

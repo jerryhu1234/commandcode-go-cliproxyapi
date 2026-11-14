@@ -40,7 +40,10 @@ function executeAuth(raw, { host = "localhost:8317", userAgent = "quota-test/1.0
       },
     },
   };
-  return vm.runInNewContext(`(${source[0]})`, context)();
+  // VM object literals have a different Object.prototype. Copy these flat
+  // data records into the test realm so strict assertions check their data
+  // rather than failing solely on the VM boundary.
+  return { ...vm.runInNewContext(`(${source[0]})`, context)() };
 }
 
 function executeRequest({ raw, responses, storageError, storageReads } = {}) {
@@ -58,10 +61,22 @@ function executeRequest({ raw, responses, storageError, storageReads } = {}) {
   const functions = requestSource[0].replace(/\n  function text\($/, "");
   const run = `(function() { let pageAuthKey = ""; const endpoint = "/quota"; ${functions} return {authStatus, auth, request, stats: () => ({reads: counters.reads, calls: counters.calls})}; })()`;
   context.counters = counters;
-  return vm.runInNewContext(run, context);
+  const page = vm.runInNewContext(run, context);
+  return { ...page, stats: () => ({ ...page.stats() }) };
 }
 
 const state = key => JSON.stringify({ state: { managementKey: key } });
+
+test("test helpers return host-realm data without weakening strict assertions", () => {
+  const auth = executeAuth(state("helper-key"));
+  assert.equal(Object.getPrototypeOf(auth), Object.prototype);
+  assert.deepEqual(auth, { key: "helper-key", status: "ok" });
+  assert.throws(() => assert.deepEqual(auth, { key: "wrong-key", status: "ok" }), assert.AssertionError);
+  assert.throws(() => assert.deepEqual(auth, { key: "helper-key", status: "missing" }), assert.AssertionError);
+  const page = executeRequest({});
+  assert.equal(Object.getPrototypeOf(page.stats()), Object.prototype);
+  assert.deepEqual(page.stats(), { reads: 0, calls: 0 });
+});
 
 test("auth reads plaintext, v1, and v2 management keys", () => {
   const host = "example.test:9443";

@@ -6,10 +6,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// authSyncLocks serializes syncAccountEmail per auth-file path. Entries are
+// never removed — the set of materialized auth files is small and stable.
+var authSyncLocks sync.Map // path -> *sync.Mutex
+
+func lockAuthSyncPath(path string) func() {
+	muAny, _ := authSyncLocks.LoadOrStore(path, &sync.Mutex{})
+	mu := muAny.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
 
 // syncAccountEmail persists one account's email into its own auth file so the
 // host can surface it as the credential's email (and the management panel can
@@ -60,6 +72,13 @@ func (m *Manager) syncAccountEmail(ctx context.Context, key, email string) error
 	if !strings.HasSuffix(path, ".json") {
 		return fmt.Errorf("account email sync skipped: auth path is not a json file")
 	}
+	// Serialize the read-merge-rename critical section per path: overlapping
+	// refresh ticks targeting the same credential must not interleave their
+	// read-merge windows. An in-process mutex is the right scope — every
+	// writer to this file (quota refresh ticks) lives in this process, and
+	// a sidecar lock file would litter the host's watched auth dir.
+	unlock := lockAuthSyncPath(path)
+	defer unlock()
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -90,11 +109,23 @@ func (m *Manager) syncAccountEmail(ctx context.Context, key, email string) error
 		_ = tmp.Close()
 		return fmt.Errorf("account email sync failed: %w", err)
 	}
+	// fsync before the rename: after a crash the watcher-reloaded file must
+	// not point at zeroed/partial blocks (rename alone is only metadata).
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("account email sync failed: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("account email sync failed: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("account email sync failed: %w", err)
+	}
+	// Persist the rename itself (best effort: failure loses durability, not
+	// correctness — the next quota refresh resyncs the email).
+	if dirf, derr := os.Open(dir); derr == nil {
+		_ = dirf.Sync()
+		_ = dirf.Close()
 	}
 	return nil
 }

@@ -8,6 +8,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -15,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/config"
 	"commandcode-go-cliproxyapi/internal/predictor"
@@ -63,9 +64,20 @@ func predictorDataDir(cfg config.Config) string {
 
 // buildPredictor constructs the engine for one lifecycle; nil when the
 // predictor is disabled or no credentials are configured.
-func (m *Manager) buildPredictor(cfg config.Config) *predictor.Engine {
+func (m *Manager) buildPredictor(ctx context.Context, cfg config.Config) *predictor.Engine {
 	if !cfg.Predictor.Enabled || len(cfg.APIKeys) == 0 {
 		return nil
+	}
+	// Seed labels from the auth files so the first page load after a restart
+	// shows the mailbox instead of the digest placeholder. This is a local
+	// host callback; it never reaches the account API.
+	keys := predictorKeys(cfg)
+	if emails := m.accountEmails(ctx); len(emails) > 0 {
+		for i := range keys {
+			if email := emails[keys[i].ID]; email != "" {
+				keys[i].Label = email
+			}
+		}
 	}
 	dataDir := predictorDataDir(cfg)
 	if dataDir != "" {
@@ -84,7 +96,7 @@ func (m *Manager) buildPredictor(cfg config.Config) *predictor.Engine {
 		Horizon:         cfg.Predictor.Horizon,
 		TypeKey:         predictorTypeKey,
 		DataDir:         dataDir,
-		Keys:            predictorKeys(cfg),
+		Keys:            keys,
 		Fetch:           m.fetchPredictorSnapshot,
 		Log:             m.predictorLog,
 	})

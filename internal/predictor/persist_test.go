@@ -324,3 +324,51 @@ func mustStatMode(t *testing.T, path string) os.FileMode {
 	}
 	return info.Mode()
 }
+
+// TestRewritesSerializeOnSharedPath pins the dual-engine persist contract:
+// two persister instances (an old engine's final flush racing a new engine's
+// compaction) share one history path. The tmp file must be unique per
+// rewrite — a fixed path+".tmp" makes the losing rename fail with ENOENT
+// after the winner moved it, and a concurrent truncation corrupts the other
+// writer's temp contents.
+func TestRewritesSerializeOnSharedPath(t *testing.T) {
+	dir := t.TempDir()
+	p1 := &persister{path: filepath.Join(dir, "usage-samples.ndjson")}
+	p2 := &persister{path: p1.path}
+	a := []persistRecord{labelRecord{KeyID: "k", Label: "A"}}
+	b := []persistRecord{labelRecord{KeyID: "k", Label: "B"}}
+	// One pair of goroutines released together, repeated so the interleaving
+	// (winner rename, loser rename) actually happens instead of the scheduler
+	// running the writers strictly back to back.
+	const rounds = 200
+	for r := 0; r < rounds; r++ {
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		for _, pw := range []struct {
+			p    *persister
+			recs []persistRecord
+		}{{p1, a}, {p2, b}} {
+			go func(p *persister, recs []persistRecord) {
+				<-start
+				errs <- p.rewrite(recs)
+			}(pw.p, pw.recs)
+		}
+		close(start)
+		for i := 0; i < 2; i++ {
+			if err := <-errs; err != nil {
+				t.Fatalf("round %d: concurrent rewrite failed: %v", r, err)
+			}
+		}
+		data, err := os.ReadFile(p1.path)
+		if err != nil {
+			t.Fatalf("round %d: read history: %v", r, err)
+		}
+		lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
+		if len(lines) != 1 {
+			t.Fatalf("round %d: history holds %d lines, want exactly one writer's full set", r, len(lines))
+		}
+		if _, ok := DecodeRecord(lines[0]); !ok {
+			t.Fatalf("round %d: torn line after concurrent rewrite: %q", r, lines[0])
+		}
+	}
+}

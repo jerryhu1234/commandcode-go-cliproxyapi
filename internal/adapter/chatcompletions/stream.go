@@ -3,6 +3,7 @@ package chatcompletions
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -69,6 +70,7 @@ func (sc *StreamConverter) StreamSnapshot() shared.StreamSnapshot { return sc.st
 type streamTool struct {
 	blockIndex   int
 	id           string
+	itemID       string // fc_-prefixed Responses item id shared by deltas and done events
 	name         string
 	args         strings.Builder
 	stopped      bool // content_block_stop emitted
@@ -77,6 +79,63 @@ type streamTool struct {
 	argsSent     int  // bytes already emitted as function_call_arguments.delta
 	identity     shared.ResponsesToolIdentity
 	responseDone bool
+
+	// TEMP DIAGNOSTIC (remove together with dumpBadTools): fragment
+	// provenance for the terminal tool-args guard. frags counts argument
+	// fragments received on this index; idChanged counts distinct non-empty
+	// call-id changes, the fingerprint of upstream index omission/reuse
+	// (parallel calls merged into one accumulator and concatenated).
+	frags     int
+	lastID    string
+	idChanged int
+}
+
+// trackDelta is TEMP DIAGNOSTIC bookkeeping; it must not affect behavior.
+func (t *streamTool) trackDelta(id string) {
+	t.frags++
+	if id == "" {
+		return
+	}
+	if t.lastID != "" && t.lastID != id {
+		t.idChanged++
+	}
+	t.lastID = id
+}
+
+// dumpBadTools is TEMP DIAGNOSTIC (remove after investigation): gated by
+// the plugin config (debug-tool-args-dump) and appends to shared's dump
+// file, so the failure can be attributed to the upstream payload
+// (truncated / fenced / concatenated JSON) or to plugin aggregation (index
+// omission, index reuse, duplicate fragments). finish reports the upstream
+// finish_reason/stop_reason when known: length ⇒ token-budget truncation,
+// stop/tool_calls ⇒ upstream declared completion over truncated arguments.
+// Sampling keeps each line bounded while exposing both the start
+// (concatenation evidence) and the end (truncation evidence) of the
+// argument string.
+func dumpBadTools(site, finish string, sc *StreamConverter) {
+	if !shared.ToolArgsDumpEnabled() {
+		return
+	}
+	const maxSample = 800
+	for _, idx := range sc.toolOrder {
+		t := sc.tools[idx]
+		if t == nil {
+			continue
+		}
+		args := t.args.String()
+		var probe any
+		bad := json.Unmarshal([]byte(shared.DefaultArgs(args)), &probe) != nil
+		head, tail := "", ""
+		if bad && len(args) > 0 {
+			if len(args) > maxSample {
+				head, tail = args[:maxSample], args[len(args)-maxSample:]
+			} else {
+				head = args
+			}
+		}
+		shared.AppendToolArgsDump(fmt.Sprintf("CCDBG tool site=%s finish=%q src=%s idx=%d bad=%t frags=%d id_changed=%d last_id=%q id=%q name=%q args_len=%d head=%q tail=%q\n",
+			site, finish, sc.sourceFormat, idx, bad, t.frags, t.idChanged, t.lastID, t.id, t.name, len(args), head, tail))
+	}
 }
 
 // NewStreamConverter returns a converter translating Chat Completions
@@ -230,7 +289,7 @@ func (sc *StreamConverter) passthroughLine(line string) ([][]byte, *errclass.Err
 			for _, tc := range c.Delta.ToolCalls {
 				t := sc.tools[tc.Index]
 				if t == nil {
-					t = &streamTool{id: tc.ID}
+					t = &streamTool{id: tc.ID, itemID: shared.FunctionCallItemID(tc.ID)}
 					sc.tools[tc.Index] = t
 					sc.toolOrder = append(sc.toolOrder, tc.Index)
 				}
@@ -238,6 +297,7 @@ func (sc *StreamConverter) passthroughLine(line string) ([][]byte, *errclass.Err
 					t.name += tc.Function.Name
 				}
 				if tc.Function.Arguments != "" {
+					t.trackDelta(tc.ID) // TEMP DIAGNOSTIC: remove with dumpBadTools
 					t.args.WriteString(tc.Function.Arguments)
 				}
 			}
@@ -263,6 +323,7 @@ func (sc *StreamConverter) usageChanged(usage *ccUsage) bool {
 }
 
 func (sc *StreamConverter) validateAccumulatedTools() *errclass.Error {
+	failed := false
 	for _, idx := range sc.toolOrder {
 		t := sc.tools[idx]
 		if t == nil {
@@ -271,8 +332,13 @@ func (sc *StreamConverter) validateAccumulatedTools() *errclass.Error {
 		raw := shared.DefaultArgs(t.args.String())
 		var value any
 		if json.Unmarshal([]byte(raw), &value) != nil {
-			return errclass.Translation("tool call arguments were incomplete at stream completion")
+			failed = true
 		}
+	}
+	if failed {
+		// TEMP DIAGNOSTIC: identify the offending accumulated args.
+		dumpBadTools("cc_done", sc.heldFinish, sc)
+		return errclass.Translation("tool call arguments were incomplete at stream completion")
 	}
 	return nil
 }
@@ -350,21 +416,44 @@ func (sc *StreamConverter) decodeChunk(data string) (*ccChunk, *errclass.Error) 
 // server failure.
 func chunkError(e *ccChunkError) *errclass.Error {
 	status := 0
+	providerCode := e.Type
 	switch c := e.Code.(type) {
 	case float64:
 		status = int(c)
 	case string:
 		if n, err := strconv.Atoi(c); err == nil {
 			status = n
-		} else if strings.Contains(c, "rate_limit") {
+		} else {
+			if providerCode == "" {
+				providerCode = c
+			}
+			switch c {
+			case "unsupported_model", "invalid_request_error":
+				status = 400
+			case "authentication_error":
+				status = 401
+			case "upgrade_required":
+				status = 403
+			case "cmd_zdr_no_providers":
+				status = 422
+			case "rate_limit_error":
+				status = 429
+			case "server_error", "api_error", "overloaded_error":
+				status = 500
+			default:
+				if strings.Contains(strings.ToLower(c), "rate_limit") {
+					status = 429
+				}
+			}
+		}
+	}
+	if status == 0 {
+		if strings.Contains(e.Type, "rate_limit") {
 			status = 429
 		}
 	}
-	if status == 0 && strings.Contains(e.Type, "rate_limit") {
-		status = 429
-	}
 	if status > 0 {
-		return errclass.FromStatus(status, e.Message)
+		return shared.ClassifyUpstreamError(status, providerCode, e.Message)
 	}
 	return errclass.UpstreamFallback(e.Message)
 }
@@ -475,7 +564,7 @@ func (sc *StreamConverter) claudeLine(line string) ([][]byte, *errclass.Error) {
 		t := sc.tools[tc.Index]
 		if t == nil {
 			events = append(events, sc.stopBlocks()...)
-			t = &streamTool{blockIndex: sc.nextIndex, id: tc.ID, name: tc.Function.Name}
+			t = &streamTool{blockIndex: sc.nextIndex, id: tc.ID, itemID: shared.FunctionCallItemID(tc.ID), name: tc.Function.Name}
 			sc.nextIndex++
 			sc.tools[tc.Index] = t
 			sc.toolsSeen = true
@@ -484,6 +573,7 @@ func (sc *StreamConverter) claudeLine(line string) ([][]byte, *errclass.Error) {
 				map[string]any{"id": t.id, "name": t.name, "input": map[string]any{}}))
 		}
 		if tc.Function.Arguments != "" {
+			t.trackDelta(tc.ID) // TEMP DIAGNOSTIC: remove with dumpBadTools
 			t.args.WriteString(tc.Function.Arguments)
 			events = append(events, sc.claudeEm.ContentBlockDelta(t.blockIndex,
 				map[string]any{"type": "input_json_delta", "partial_json": tc.Function.Arguments}))
@@ -671,7 +761,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		}
 		if t == nil {
 			events = append(events, sc.stopReasoning()...)
-			t = &streamTool{blockIndex: sc.nextIndex, id: tc.ID}
+			t = &streamTool{blockIndex: sc.nextIndex, id: tc.ID, itemID: shared.FunctionCallItemID(tc.ID)}
 			sc.nextIndex++
 			sc.tools[tc.Index] = t
 			sc.toolsSeen = true
@@ -694,6 +784,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 			}
 		}
 		if tc.Function.Arguments != "" {
+			t.trackDelta(tc.ID) // TEMP DIAGNOSTIC: remove with dumpBadTools
 			t.args.WriteString(tc.Function.Arguments)
 		}
 		kind, exact, wait := sc.toolContext.ClassifyStreamedName(t.name)
@@ -714,7 +805,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 				}
 				events = append(events, sc.responsesEm().ItemAdded(t.blockIndex, item))
 			} else {
-				item := map[string]any{"type": "function_call", "call_id": t.id, "name": outputName, "arguments": ""}
+				item := map[string]any{"type": "function_call", "id": t.itemID, "call_id": t.id, "name": outputName, "arguments": ""}
 				if t.identity.Namespace != "" {
 					item["namespace"] = t.identity.Namespace
 				}
@@ -724,7 +815,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		if t.announced && !t.custom && t.argsSent < t.args.Len() {
 			pending := t.args.String()[t.argsSent:]
 			t.argsSent = t.args.Len()
-			events = append(events, sc.responsesEm().ArgsDelta(t.id, t.blockIndex, pending))
+			events = append(events, sc.responsesEm().ArgsDelta(t.itemID, t.blockIndex, pending))
 		}
 	}
 	if choice.FinishReason != "" && !sc.finished {
@@ -736,7 +827,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 				// conservatively as a function and flush every buffered argument byte.
 				t.announced = true
 				events = append(events, sc.responsesEm().ItemAdded(t.blockIndex, map[string]any{
-					"type": "function_call", "call_id": t.id, "name": t.name, "arguments": "",
+					"type": "function_call", "id": t.itemID, "call_id": t.id, "name": t.name, "arguments": "",
 				}))
 			}
 			if t.custom {
@@ -746,11 +837,13 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 			} else if t.argsSent < t.args.Len() {
 				pending := t.args.String()[t.argsSent:]
 				t.argsSent = t.args.Len()
-				events = append(events, sc.responsesEm().ArgsDelta(t.id, t.blockIndex, pending))
+				events = append(events, sc.responsesEm().ArgsDelta(t.itemID, t.blockIndex, pending))
 			}
 			if !t.custom {
 				var decoded any
 				if json.Unmarshal([]byte(shared.DefaultArgs(t.args.String())), &decoded) != nil {
+					// TEMP DIAGNOSTIC: identify the offending accumulated args.
+					dumpBadTools("cc_finish", choice.FinishReason, sc)
 					return nil, errclass.Translation("tool call arguments were incomplete at stream completion")
 				}
 			}
@@ -831,8 +924,8 @@ func (sc *StreamConverter) closeResponseTools() ([][]byte, *errclass.Error) {
 			if json.Unmarshal([]byte(arguments), &decoded) != nil {
 				continue
 			}
-			item := shared.RespItem{Type: "function_call", CallID: t.id, Name: outputName, Namespace: t.identity.Namespace, Arguments: arguments, Status: "completed"}
-			events = append(events, sc.responsesEm().ArgsDone(t.id, t.blockIndex, item.Arguments, item)...)
+			item := shared.RespItem{Type: "function_call", ID: t.itemID, CallID: t.id, Name: outputName, Namespace: t.identity.Namespace, Arguments: arguments, Status: "completed"}
+			events = append(events, sc.responsesEm().ArgsDone(t.itemID, t.blockIndex, item.Arguments, item)...)
 			sc.responseItems[t.blockIndex] = item
 		}
 		t.responseDone = true

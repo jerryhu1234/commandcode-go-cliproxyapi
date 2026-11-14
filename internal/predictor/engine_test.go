@@ -3,6 +3,7 @@ package predictor
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -175,6 +176,28 @@ func TestEngineAccelerateDecision(t *testing.T) {
 	}
 }
 
+// TestSnapshotUsesConfiguredLabelOverCredentialFallback pins the page identity:
+// a persisted digest label from an older build must not hide the mailbox that
+// the plugin resolved for the same key.
+func TestSnapshotUsesConfiguredLabelOverCredentialFallback(t *testing.T) {
+	now := time.Now().UTC()
+	e := NewEngine(Options{
+		Interval:        time.Minute,
+		BudgetPerMinute: 1,
+		History:         time.Hour,
+		Horizon:         time.Hour,
+		Keys:            []KeyRef{{ID: "k1", Label: "dev@example.test", Key: "sk-test"}},
+		Now:             func() time.Time { return now },
+	})
+	e.Store().Apply(AccountSnapshot{KeyID: "k1", Label: "CommandCode credential deadbeef", At: now,
+		Included: &USDWindow{Remaining: 50, Cap: 100}, PurchasedUSD: -1})
+
+	data := e.Snapshot(nil)
+	if got := data.Accounts[0].Label; got != "dev@example.test" {
+		t.Fatalf("label = %q, want the configured account email", got)
+	}
+}
+
 func TestSnapshotShape(t *testing.T) {
 	e := NewEngine(fastOptions(testFetchOK(90)))
 	now := time.Now().UTC()
@@ -206,5 +229,32 @@ func TestSnapshotShape(t *testing.T) {
 	data = e.Snapshot(&dl)
 	if data.ByType["ollama"].AtDeadline == nil {
 		t.Fatal("deadline evaluation missing")
+	}
+}
+
+// TestGuardPanicAbsorbsLoopPanics pins the per-loop panic guard: predictor
+// loops run inside the host process, so an unrecovered panic in refiller,
+// flusher, or sampler code aborts the whole CPA host — guardPanic must log
+// and absorb, and stay silent on the normal path.
+func TestGuardPanicAbsorbsLoopPanics(t *testing.T) {
+	var captured []string
+	e := NewEngine(Options{
+		Interval: time.Minute, History: time.Hour, Horizon: time.Hour,
+		Log: func(level, msg string, fields map[string]any) {
+			captured = append(captured, level+" "+msg)
+		},
+	})
+	func() {
+		defer e.guardPanic("keyLoop:k1")
+		panic("boom")
+	}()
+	if len(captured) != 1 || !strings.Contains(captured[0], "panic") {
+		t.Fatalf("guardPanic log = %v, want one panic entry", captured)
+	}
+	func() {
+		defer e.guardPanic("refillLoop")
+	}()
+	if len(captured) != 1 {
+		t.Fatalf("guardPanic logged on the normal path: %v", captured)
 	}
 }

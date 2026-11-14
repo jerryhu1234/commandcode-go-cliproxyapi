@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"commandcode-go-cliproxyapi/internal/adapter/shared"
 	"commandcode-go-cliproxyapi/internal/catalog"
@@ -1565,6 +1565,16 @@ func TestConvertNonStreamSeamBranches(t *testing.T) {
 	if got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session"); got.Get("Authorization") != "Bearer k" || got.Get("x-commandcode-session") != "session" {
 		t.Fatalf("bearer headers = %v", got)
 	}
+	zdrHeaders := upstreamAuthHeaders(catalog.RouteMessages, "k", "session", http.Header{"X-Cmd-Zdr": []string{"1"}})
+	if zdrHeaders.Get("x-cmd-zdr") != "1" {
+		t.Fatalf("documented ZDR opt-in was not forwarded: %v", zdrHeaders)
+	}
+	for _, value := range []string{"0", "true", "1, 0"} {
+		got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session", http.Header{"X-Cmd-Zdr": []string{value}})
+		if got.Get("x-cmd-zdr") != "" {
+			t.Errorf("non-canonical ZDR value %q was forwarded as %q", value, got.Get("x-cmd-zdr"))
+		}
+	}
 	// Adapters own status classification uniformly (§7).
 	if _, eErr := convertNonStream(catalog.RouteMessages, "claude", http.StatusServiceUnavailable, []byte("upstream down")); eErr == nil ||
 		eErr.Class != errclass.ClassUpstream || !eErr.Retryable {
@@ -1869,5 +1879,100 @@ func TestExecuteStreamBlockedEmitCannotWedgeTheProducer(t *testing.T) {
 	if len(downCloses) == 0 || !strings.Contains(string(downCloses[0].payload), `"down-blocked"`) ||
 		!strings.Contains(string(downCloses[0].payload), `"error"`) {
 		t.Fatalf("downstream close with error label missing: %v", downCloses)
+	}
+}
+
+// TestExecuteNonStreamCarriesUpstreamRetryAfter pins the envelope retry hint:
+// the pluginabi wire contract has RetryAfterSeconds (older hosts silently
+// ignore it), and the host's conductor uses it to time the credential
+// cooldown — a 429 with "Retry-After: 30" must surface as
+// retry_after_seconds=30 instead of being re-treated as the default burn.
+func TestExecuteNonStreamCarriesUpstreamRetryAfter(t *testing.T) {
+	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		if method == pluginabi.MethodHostHTTPDo {
+			var wire map[string]any
+			_ = json.Unmarshal(payload, &wire)
+			if url, _ := wire["url"].(string); strings.HasSuffix(url, "/chat/completions") {
+				return hostOK(pluginapi.HTTPResponse{
+					StatusCode: http.StatusTooManyRequests,
+					Headers:    http.Header{"Retry-After": []string{"30"}},
+					Body:       []byte(`{"error":{"message":"rate limited"}}`),
+				}), nil
+			}
+			return hostOK(pluginapi.HTTPResponse{
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{"Content-Type": []string{"application/json"}},
+				Body:       []byte(testCatalogJSON),
+			}), nil
+		}
+		return hostOK(map[string]any{}), nil
+	}}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	env := mustExecute(t, m, "commandcode/glm-5.3", "openai", []byte(ccRequestBody))
+	if env.OK || env.Error == nil {
+		t.Fatalf("want error envelope, got %+v", env)
+	}
+	if env.Error.Code != "rate_limit" || env.Error.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("classification = %+v", env.Error)
+	}
+	if env.Error.RetryAfterSeconds != 30 {
+		t.Fatalf("retry_after_seconds = %d, want 30 parsed from the upstream Retry-After header", env.Error.RetryAfterSeconds)
+	}
+}
+
+// TestStreamCloseCarriesErrorDetail pins the structured close contract: the
+// host's stream bridge accepts an error_detail (pluginabi.Error — status,
+// code, retry guidance) that takes precedence over the plain error string;
+// a converter terminal failure must close the downstream stream with that
+// detail so the client sees the classified status instead of the host's
+// status-less default.
+func TestStreamCloseCarriesErrorDetail(t *testing.T) {
+	sc := streamScript{
+		upstreamID: "up-conv",
+		frames: []string{
+			`{"type":"message_start","message":{"id":"m1","model":"glm-5.3","usage":{"input_tokens":1}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","id":"blk"}}`,
+			`{"type":"input_json_delta","index":0,"delta":{"partial_json":"x"}}`,
+		},
+	}
+	m, f := newStreamManager(t, sc)
+	if _, err := m.HandleCall("executor.execute_stream", execStreamReqBody("commandcode/minimax-m3", "claude", []byte(claudeRequestBody), "down-conv")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(f.callsOf(pluginabi.MethodHostStreamClose)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	var downClose []byte
+	for _, c := range f.callsOf(pluginabi.MethodHostStreamClose) {
+		var wire map[string]any
+		if json.Unmarshal(c.payload, &wire) == nil && wire["stream_id"] == "down-conv" {
+			downClose = c.payload
+		}
+	}
+	if downClose == nil {
+		t.Fatal("downstream stream was never closed")
+	}
+	var wire struct {
+		StreamID    string           `json:"stream_id"`
+		Error       string           `json:"error"`
+		ErrorDetail *pluginabi.Error `json:"error_detail"`
+	}
+	if err := json.Unmarshal(downClose, &wire); err != nil {
+		t.Fatalf("close payload: %v", err)
+	}
+	if wire.ErrorDetail == nil {
+		t.Fatalf("downstream close carried no error_detail: %s", downClose)
+	}
+	if wire.ErrorDetail.Code != "translation_failure" ||
+		wire.ErrorDetail.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("error_detail = %+v, want translation_failure/400", wire.ErrorDetail)
+	}
+	if !strings.Contains(wire.ErrorDetail.Message, "terminal stop reason") {
+		t.Fatalf("error_detail message lost the cause: %q", wire.ErrorDetail.Message)
 	}
 }
