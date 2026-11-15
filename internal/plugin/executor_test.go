@@ -2261,3 +2261,98 @@ func TestBatchingAllowedGate(t *testing.T) {
 		}
 	}
 }
+
+// Zero-output guard (port of CPA >=8.0.72 issue #7513): a stream that ends
+// with the upstream completion terminal but never produced visible output
+// must fail retryably (downstream close carries the 502 detail) instead of
+// closing as a clean empty success, so the host can fail over.
+func TestExecuteStreamZeroOutputTerminalFailsRetryable(t *testing.T) {
+	m, f := newStreamManager(t, streamScript{
+		upstreamID: "up-zero",
+		frames: []string{
+			`data: {"id":"z1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n",
+			`data: {"id":"z1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+			"data: [DONE]\n\n",
+		},
+	})
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-zero"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	m.bridge.WaitForInFlight(5 * time.Second)
+	downCloses := f.callsOf(pluginabi.MethodHostStreamClose)
+	if len(downCloses) == 0 {
+		t.Fatalf("zero-output stream must fail the downstream stream, not close cleanly")
+	}
+	var hasDetail bool
+	for _, c := range downCloses {
+		if strings.Contains(string(c.payload), "zero visible output") {
+			hasDetail = true
+		}
+	}
+	if !hasDetail {
+		t.Fatalf("downstream close must carry the zero-output 502 detail")
+	}
+	if got := f.callsOf(pluginabi.MethodHostStreamEmit); len(got) > 2 {
+		t.Fatalf("guard fired after output events were emitted: %d emits", len(got))
+	}
+}
+
+// stream-zero-output-fail: false restores the pre-guard contract (clean close).
+func TestExecuteStreamZeroOutputGuardDisabledKeepsCleanClose(t *testing.T) {
+	m, f := newStreamManager(t, streamScript{
+		upstreamID: "up-zoff",
+		frames: []string{
+			`data: {"id":"z2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n",
+			`data: {"id":"z2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+			"data: [DONE]\n\n",
+		},
+	})
+	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML+"stream-zero-output-fail: false\n")); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-zoff"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	m.bridge.WaitForInFlight(5 * time.Second)
+	for _, c := range f.callsOf(pluginabi.MethodHostStreamClose) {
+		if strings.Contains(string(c.payload), "zero visible output") {
+			t.Fatalf("guard ran despite opt-out: %q", c.payload)
+		}
+	}
+}
+
+// The guard must not misfire once visible output exists.
+func TestExecuteStreamVisibleOutputNeverFailsGuard(t *testing.T) {
+	m, f := newStreamManager(t, streamScript{
+		upstreamID: "up-vout",
+		frames: []string{
+			`data: {"id":"v1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}` + "\n\n",
+			`data: {"id":"v1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+			"data: [DONE]\n\n",
+		},
+	})
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-vout"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	m.bridge.WaitForInFlight(5 * time.Second)
+	for _, c := range f.callsOf(pluginabi.MethodHostStreamClose) {
+		if strings.Contains(string(c.payload), "zero visible output") {
+			t.Fatalf("guard misfired on visible output: %q", c.payload)
+		}
+	}
+}

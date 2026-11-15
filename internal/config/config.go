@@ -22,6 +22,9 @@ const (
 	DefaultStreamFirstDataTimeout = 60 * time.Second
 	DefaultStreamIdleTimeout      = 3 * time.Minute
 	DefaultStreamTotalTimeout     = 30 * time.Minute
+	// DefaultStreamZeroOutputFail enables the zero-output guard unless the
+	// operator opts out; an empty terminal-success hides upstream breakage.
+	DefaultStreamZeroOutputFail   = true
 	DefaultStreamFinishGrace      = 15 * time.Second
 	DefaultMaxResponseBytes       = int64(67108864) // 64 MiB
 	DefaultResponsesCompatibility = "cpa"
@@ -94,6 +97,12 @@ type Config struct {
 	StreamFinishGrace      time.Duration
 	MaxResponseBytes       int64
 	ResponsesCompatibility string
+	// StreamZeroOutputFail fails (retryable 502) a stream that terminated
+	// cleanly with a finish/done terminal but produced zero visible output
+	// (no text, reasoning, or tool-call events). Ports the CPA >=8.0.72
+	// zero-output guard (issue #7513) so the host can fail over instead of
+	// delivering an empty "successful" reply. Default true.
+	StreamZeroOutputFail bool
 	// DebugToolArgsDump turns on the TEMP DIAGNOSTIC tool-args guard dump
 	// (commandcode-toolargs.log next to the host binary). Off by default;
 	// remove together with the diagnostic plumbing once the guard
@@ -121,6 +130,7 @@ type rawConfig struct {
 	StreamFinishGrace      *string                  `yaml:"stream-finish-grace"`
 	MaxResponseBytes       *int64                   `yaml:"max-response-bytes"`
 	ResponsesCompatibility *string                  `yaml:"responses-compatibility"`
+	StreamZeroOutputFail   *bool                    `yaml:"stream-zero-output-fail"`
 	DebugToolArgsDump      *bool                    `yaml:"debug-tool-args-dump"`
 }
 
@@ -261,6 +271,7 @@ func Load(yamlBytes []byte) (Config, error) {
 		StreamFinishGrace:      streamFinishGrace,
 		MaxResponseBytes:       orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
 		ResponsesCompatibility: strings.ToLower(strings.TrimSpace(orDefault(raw.ResponsesCompatibility, DefaultResponsesCompatibility))),
+		StreamZeroOutputFail:   orDefault(raw.StreamZeroOutputFail, DefaultStreamZeroOutputFail),
 		DebugToolArgsDump:      orDefault(raw.DebugToolArgsDump, false),
 	}
 	if raw.CatalogURL != nil {

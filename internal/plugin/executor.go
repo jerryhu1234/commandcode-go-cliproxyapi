@@ -544,6 +544,11 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	// upstream bytes it has not processed yet. Without it the depth-1 buffer
 	// would let the pump read up to one extra chunk (~32 KiB) past the cap.
 	var bufferedBytes atomic.Int64
+	// Zero-output guard (port of CPA >=8.0.72 issue #7513): a cleanly
+	// terminated stream that never carried visible output fails retryably so
+	// the host can fail over instead of delivering an empty reply.
+	zeroOutputFail := res.cfg.StreamZeroOutputFail
+	sawVisibleOutput := false
 	// Prefetch: one reader goroutine keeps draining the upstream via
 	// StreamRead into a small buffer while the converter/emitter loop works.
 	// The host hand-delivers exactly one 32KiB chunk per stream_read RPC with
@@ -643,6 +648,9 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			return
 		}
 		events, done, convErr := conv.Feed(payload)
+		if !sawVisibleOutput && shared.StreamEventsHaveVisibleOutput(sourceFormat, events) {
+			sawVisibleOutput = true
+		}
 		if snapper != nil {
 			snap := snapper.StreamSnapshot()
 			if snap.Progress > lastSnapshot.Progress {
@@ -699,6 +707,26 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 				return
 			}
 		}
+	}
+	if !logged && finishCause == "" && convDone && zeroOutputFail &&
+		lastSnapshot.FinishSeen && !sawVisibleOutput {
+		// Zero-output guard: the upstream asserted its completion terminal
+		// but nothing visible was ever converted. Mirrors the CPA >=8.0.72
+		// zero-output guard (issue #7513): fail retryably (502) instead of
+		// committing an empty success, so the host conductor can rotate to
+		// another credential. Only fires before any downstream-visible
+		// output existed; partial outputs keep streaming (fail-open
+		// inspection cannot hide a legitimate output — unknown frames
+		// count as visible).
+		wire := errclass.ToEnvelopeError(&errclass.Error{
+			Class:      errclass.ClassUpstream,
+			Message:    "upstream stream finished with zero visible output",
+			StatusCode: 502,
+			Retryable:  true,
+		})
+		closeStreams(wire.Message, &wire)
+		logDone("zero_output", upstreamClosed)
+		return
 	}
 	if !logged && finishCause == "" {
 		finishCause = "terminal"
