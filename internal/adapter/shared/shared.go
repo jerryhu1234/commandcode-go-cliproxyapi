@@ -559,6 +559,68 @@ func ClaudeImageURL(srcType, url, mediaType, data string) (string, *errclass.Err
 }
 
 // SSEEvent renders one named SSE frame.
+
+// JoinStreamEvents packs the events converted from one upstream read into a
+// SINGLE downstream stream_emit payload. Batching removes the per-event cgo
+// round trip through the host's downstream queue. Callers gate it on
+// positive host-consumer evidence (plugin batch gate): the join is
+// byte-equivalent to per-event emission ONLY for consumers that split frames
+// on blank lines — the same-format openai deframer (deframeExecutorSSEChunks),
+// the Responses handler framer and the per-chunk line-based usage normalizer,
+// the raw-write messages handler. Host-side CROSS-format stream translation
+// (gemini /v1beta, interactions endpoints) consumes each CHUNK as a single
+// translated unit and must NOT receive joined payloads. Framing rules per
+// client format:
+//
+//   - "openai": converters emit bare JSON (the "data:" prefix is stripped),
+//     but host-side deframing and the shared handlers only split SSE frames,
+//     so each event is re-wrapped as "data: <json>\n\n". The handler re-adds
+//     its own "data:" prefix after the same-format translator strips again,
+//     matching per-event emission exactly.
+//   - "claude" / "openai-response": converters emit complete SSE blocks
+//     ("event: ...\ndata: ...\n\n", including verbatim passthrough raw
+//     blocks). They are joined as-is; an event missing its blank-line
+//     terminator (never produced today) gets one appended so batched blocks
+//     cannot fuse.
+func JoinStreamEvents(sourceFormat string, events [][]byte) []byte {
+	if len(events) == 0 {
+		return nil
+	}
+	size := 0
+	for _, evt := range events {
+		size += len(evt) + 16
+	}
+	out := make([]byte, 0, size)
+	for _, evt := range events {
+		trimmed := bytes.TrimSpace(evt)
+		if len(trimmed) == 0 {
+			continue
+		}
+		if sourceFormat == "openai" {
+			if !bytes.HasPrefix(trimmed, []byte("data:")) {
+				out = append(out, "data: "...)
+				out = append(out, trimmed...)
+			} else {
+				out = append(out, trimmed...)
+			}
+			// Guaranteed blank-line terminator so the host deframer emits
+			// this event instead of joining it with the next.
+			if !bytes.HasSuffix(out, []byte("\n\n")) {
+				out = append(out, "\n\n"...)
+			}
+			continue
+		}
+		out = append(out, evt...)
+		if !bytes.HasSuffix(evt, []byte("\n\n")) && !bytes.HasSuffix(evt, []byte("\r\n\r\n")) {
+			out = append(out, "\n\n"...)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func SSEEvent(name string, v any) []byte {
 	b, _ := json.Marshal(v) // composed marshallable types only; cannot fail
 	out := make([]byte, 0, len("event: ")+len(name)+len("\ndata: ")+len(b)+2)

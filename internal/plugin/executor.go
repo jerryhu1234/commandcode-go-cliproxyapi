@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -111,7 +112,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     url,
-		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID, req.Headers),
+		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID, req.Headers, false),
 		Body:    upstreamBody,
 	})
 	if err != nil {
@@ -145,7 +146,14 @@ func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat strin
 	return nil, errclass.Translation("unsupported route")
 }
 
-func upstreamAuthHeaders(route catalog.Route, key, sessionID string, inbound ...http.Header) http.Header {
+// upstreamAuthHeaders builds the FR-007 upstream headers. Stream requests
+// also mirror the native OpenAI-compat executor's Accept/Cache-Control pair
+// (openai_compat_executor.go): OpenAI-style gateways and CDNs key response
+// buffering off Accept, so a stream request without "Accept:
+// text/event-stream" risks server-side buffering that presents as slow
+// time-to-first-byte. Content-Type is always set: the upstream body is JSON
+// for every route, and a POST body without it is malformed per RFC 9110.
+func upstreamAuthHeaders(route catalog.Route, key, sessionID string, inbound http.Header, stream bool) http.Header {
 	var h http.Header
 	if route == catalog.RouteMessages {
 		h = messages.AuthHeaders(key)
@@ -153,11 +161,16 @@ func upstreamAuthHeaders(route catalog.Route, key, sessionID string, inbound ...
 		// Chat Completions and Responses endpoints are OpenAI-style bearer.
 		h = chatcompletions.AuthHeaders(key)
 	}
+	h.Set("Content-Type", "application/json")
+	if stream {
+		h.Set("Accept", "text/event-stream")
+		h.Set("Cache-Control", "no-cache")
+	}
 	h.Set("x-commandcode-session", sessionID)
 	// CommandCode uses this opt-in to route only through ZDR-capable upstreams.
 	// Forward only the documented enabled value; never relay arbitrary client
 	// headers across the plugin trust boundary.
-	if len(inbound) > 0 && strings.TrimSpace(inbound[0].Get("x-cmd-zdr")) == "1" {
+	if inbound != nil && strings.TrimSpace(inbound.Get("x-cmd-zdr")) == "1" {
 		h.Set("x-cmd-zdr", "1")
 	}
 	return h
@@ -426,7 +439,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 	st, _, id, err := m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     url,
-		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID, req.Headers),
+		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID, req.Headers, true),
 		Body:    upstreamBody,
 	})
 	debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v", st, id, err)
@@ -467,7 +480,8 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		// the host process — an unrecovered panic here would abort the whole
 		// CPA host, not just this request.
 		defer m.recoverStreamPump(downID)
-		m.pumpStream(downID, id, res, req.SourceFormat, streamStart, responsesRequestContext(req))
+		m.pumpStream(downID, id, res, req.SourceFormat, streamStart,
+			batchingAllowed(req.SourceFormat, executorRequestPath(req)), responsesRequestContext(req))
 	}()
 	return okEnvelope(struct{}{}), nil
 }
@@ -486,7 +500,7 @@ func (m *Manager) recoverStreamPump(downID string) {
 		map[string]any{"downstream_id": downID})
 }
 
-func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string, streamStart time.Time, originalRequest ...[]byte) {
+func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string, streamStart time.Time, batch bool, originalRequest ...[]byte) {
 	var closeOnce sync.Once
 	// closeStreams terminates both streams. detail, when non-nil, is the
 	// structured pluginabi.Error for the downstream close: the host bridge
@@ -525,8 +539,59 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 		m.logStreamFinished(res.rec.Protocol, sourceFormat, cause, streamStart, &headersAt, firstDataAt, lastProgressAt, total, chunks, lastSnapshot, eof)
 	}
 	finishCause := ""
+	// max-response-bytes accounting: bufferedBytes tracks the payload sitting
+	// in the prefetch channel (depth 1) so the consumer cap check counts
+	// upstream bytes it has not processed yet. Without it the depth-1 buffer
+	// would let the pump read up to one extra chunk (~32 KiB) past the cap.
+	var bufferedBytes atomic.Int64
+	// Prefetch: one reader goroutine keeps draining the upstream via
+	// StreamRead into a small buffer while the converter/emitter loop works.
+	// The host hand-delivers exactly one 32KiB chunk per stream_read RPC with
+	// no queueing between them, so the sequential read→feed→emit loop left
+	// the upstream socket un-drained for the whole emit phase of every chunk;
+	// a slow downstream client then back-pressured the upstream TCP stream
+	// and the remote endpoint throttled delivery. The watchdog contract still
+	// works unchanged: controller timers close the upstream stream, which
+	// releases a reader parked inside StreamRead, and its terminal result
+	// reaches the consumer loop where the cause is acted on.
+	type upstreamRead struct {
+		payload []byte
+		errMsg  string
+		closed  bool
+		err     error
+	}
+	readAhead := make(chan upstreamRead, 1)
+	consumerDone := make(chan struct{})
+	defer close(consumerDone)
+	go func() {
+		for {
+			payload, errMsg, closed, err := m.bridge.StreamRead(upstreamID)
+			bufferedBytes.Add(int64(len(payload)))
+			// Terminal reads are delivered exactly once; delivery relies on
+			// the consumer draining every result before exiting, which holds
+			// because terminal results always follow (or trigger) the
+			// consumer's own close/return paths below.
+			select {
+			case readAhead <- upstreamRead{payload: payload, errMsg: errMsg, closed: closed, err: err}:
+			case <-consumerDone:
+				return
+			}
+			if closed || err != nil || errMsg != "" {
+				return
+			}
+		}
+	}()
 	for {
-		payload, readErrMsg, closed, err := m.bridge.StreamRead(upstreamID)
+		result := <-readAhead
+		payload, readErrMsg, closed, err := result.payload, result.errMsg, result.closed, result.err
+		bufferedBytes.Add(-int64(len(result.payload)))
+		if len(payload) == 0 && !closed && err == nil && readErrMsg == "" {
+			// Defensive: the real host never resolves a stream_read with an
+			// empty non-terminal payload, but the reader free-runs now, so a
+			// misbehaving host would spin this loop at full speed. Back off
+			// instead of burning a core.
+			time.Sleep(5 * time.Millisecond)
+		}
 		debugTrace("executor stream read chunk_len=%d closed=%t readErrMsg=%q err=%v", len(payload), closed, readErrMsg, err)
 		upstreamClosed = closed
 		if cause := controller.Cause(); cause != "" {
@@ -542,7 +607,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 						logDone("terminal_error", upstreamClosed)
 						return
 					}
-					if emitErr := m.emitAll(downID, events); emitErr != nil {
+					if emitErr := m.emitAll(downID, sourceFormat, batch, events); emitErr != nil {
 						closeStreams(errclass.Redact(emitErr.Error()), nil)
 						logDone("emit_error", upstreamClosed)
 						return
@@ -572,7 +637,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 		if len(payload) > 0 {
 			chunks++
 		}
-		if total > res.cfg.MaxResponseBytes {
+		if total+bufferedBytes.Load() > res.cfg.MaxResponseBytes {
 			closeStreams(errclass.Redact("stream exceeded max-response-bytes"), nil)
 			logDone("max_bytes", upstreamClosed)
 			return
@@ -599,7 +664,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			logDone("terminal_error", upstreamClosed)
 			return
 		}
-		if emitErr := m.emitAll(downID, events); emitErr != nil {
+		if emitErr := m.emitAll(downID, sourceFormat, batch, events); emitErr != nil {
 			closeStreams(errclass.Redact(emitErr.Error()), nil)
 			logDone("emit_error", upstreamClosed)
 			return
@@ -621,14 +686,14 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 				logDone("truncated", true)
 				return
 			}
-			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
+			if emitErr := m.emitAll(downID, sourceFormat, batch, flushed); emitErr != nil {
 				closeStreams(errclass.Redact(emitErr.Error()), nil)
 				logDone("emit_error", true)
 				return
 			}
 		} else if flusher, ok := conv.(interface{ Flush() [][]byte }); ok {
 			flushed := flusher.Flush()
-			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
+			if emitErr := m.emitAll(downID, sourceFormat, batch, flushed); emitErr != nil {
 				closeStreams(errclass.Redact(emitErr.Error()), nil)
 				logDone("emit_error", true)
 				return
@@ -679,16 +744,73 @@ func (m *Manager) logStreamFinished(route catalog.Route, sourceFormat, cause str
 	_ = m.bridge.Log(level, "commandcode stream finished", fields)
 }
 
-// emitAll feeds converted events downstream in order. StreamEmit is
-// deadline-bounded (emitTimeout), so a host that stops draining the
-// downstream stream surfaces here as an error; the pump loop treats that
-// as a post-first-byte stream-fatal failure and runs fail(), whose
-// Once-closer releases both streams.
-func (m *Manager) emitAll(downStreamID string, events [][]byte) error {
-	for _, evt := range events {
-		if err := m.bridge.StreamEmit(downStreamID, evt); err != nil {
-			return err
+// emitAll feeds converted events downstream. When batch is set (gated on the
+// host-consumer evidence checked by batchingAllowed), each upstream read's
+// events are packed into ONE stream_emit RPC carrying a protocol-framed
+// payload (shared.JoinStreamEvents): the host deframer (same-format
+// chat-completions) and the handler route framers split frames by blank
+// lines, so batching is byte-equivalent to per-event emission while replacing
+// N cgo round trips (plus a goroutine and timer each) with one.
+//
+// When batch is false, every event is its own cgo StreamEmit, preserving the
+// pre-optimization contract for consumers that translate one CHUNK per call
+// with no deframer (cross-format clients) — each event stays an isolated
+// unit. StreamEmit remains deadline-bounded (emitTimeout), so a host that
+// stops draining the downstream stream surfaces here as an error; the pump
+// loop treats that as a post-first-byte stream-fatal failure and runs
+// fail(), whose Once-closer releases both streams.
+func (m *Manager) emitAll(downStreamID, sourceFormat string, batch bool, events [][]byte) error {
+	if !batch {
+		for _, evt := range events {
+			if err := m.bridge.StreamEmit(downStreamID, evt); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
-	return nil
+	payload := shared.JoinStreamEvents(sourceFormat, events)
+	if len(payload) == 0 {
+		return nil
+	}
+	return m.bridge.StreamEmit(downStreamID, payload)
+}
+
+// executorRequestPath extracts the client endpoint path the host stashes in
+// executor request metadata (coreexecutor.RequestPathMetadataKey, merged into
+// the wire payload by the host's mergeExecutorMetadata). Empty when the host
+// did not populate it — callers must treat that as no path evidence available.
+func executorRequestPath(req executorRequest) string {
+	if req.Metadata == nil {
+		return ""
+	}
+	path, _ := req.Metadata["request_path"].(string)
+	return strings.TrimSpace(path)
+}
+
+// batchingAllowed gates the batched stream_emit optimization on POSITIVE
+// evidence the host will split the joined payload back into events. The join
+// is byte-equivalent only when the host deframes (same-format openai route,
+// HasStreamResponseTransformer true) or passes chunks through verbatim with
+// line-based consumers (same-format claude messages / openai-response
+// responses routes). Cross-format clients — gemini (`/v1beta/…`),
+// interactions endpoints, any requested format outside the plugin's three
+// output formats — make the host translate each CHUNK via FormatTranslator's
+// Stream with NO deframer, so a multi-event join would corrupt delivery.
+// The host's executor request metadata carries the client endpoint path;
+// without that evidence we fall back to per-event emission.
+//
+// Known coupling (hook plugins): on same-format claude and openai-response
+// routes with no native transformer, other plugins' response hooks receive
+// whatever chunk the plugin emits. Batched, that is one multi-event payload.
+// Same-format openai is unaffected (the host deframes before hooks run).
+func batchingAllowed(sourceFormat, requestPath string) bool {
+	switch {
+	case sourceFormat == "openai" && strings.HasSuffix(requestPath, "/chat/completions"):
+		return true
+	case sourceFormat == "claude" && strings.HasSuffix(requestPath, "/messages"):
+		return true
+	case sourceFormat == "openai-response" && strings.HasSuffix(requestPath, "/responses"):
+		return true
+	}
+	return false
 }

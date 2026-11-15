@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,21 @@ func execReqBody(model, format string, body []byte, stream bool) []byte {
 
 func execStreamReqBody(model, format string, body []byte, downStreamID string) []byte {
 	return execStreamReqBodyForKey(model, format, body, downStreamID, testKey)
+}
+
+// execStreamReqBodyForKeyWithPath builds a stream request carrying the host's
+// request-path metadata (coreexecutor.RequestPathMetadataKey). The path gates
+// the batched emit optimization (batchingAllowed).
+func execStreamReqBodyForKeyWithPath(model, format string, body []byte, downStreamID, key, path string) []byte {
+	b, _ := json.Marshal(executorRequest{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			AuthProvider: ProviderID, AuthAttributes: map[string]string{"api_key": key},
+			Model: model, SourceFormat: format, OriginalRequest: body, Stream: true,
+			Metadata: map[string]any{"request_path": path},
+		},
+		StreamID: downStreamID,
+	})
+	return b
 }
 
 func execStreamReqBodyForKey(model, format string, body []byte, downStreamID, key string) []byte {
@@ -1562,15 +1578,26 @@ func TestConvertNonStreamSeamBranches(t *testing.T) {
 	if got := catalog.JoinUpstreamURL("https://gw.test/", "/v1/responses"); got != "https://gw.test/responses" {
 		t.Fatalf("url join = %q", got)
 	}
-	if got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session"); got.Get("Authorization") != "Bearer k" || got.Get("x-commandcode-session") != "session" {
+	got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session", nil, false)
+	if got.Get("Authorization") != "Bearer k" || got.Get("x-commandcode-session") != "session" {
 		t.Fatalf("bearer headers = %v", got)
 	}
-	zdrHeaders := upstreamAuthHeaders(catalog.RouteMessages, "k", "session", http.Header{"X-Cmd-Zdr": []string{"1"}})
+	if got.Get("Content-Type") != "application/json" {
+		t.Fatalf("Content-Type header missing from upstream request: %v", got)
+	}
+	if got.Get("Accept") != "" || got.Get("Cache-Control") != "" {
+		t.Fatalf("non-stream request must not claim event-stream: %v", got)
+	}
+	streamHeaders := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session", nil, true)
+	if streamHeaders.Get("Accept") != "text/event-stream" || streamHeaders.Get("Cache-Control") != "no-cache" {
+		t.Fatalf("stream request missing Accept/Cache-Control parity with the native executor: %v", streamHeaders)
+	}
+	zdrHeaders := upstreamAuthHeaders(catalog.RouteMessages, "k", "session", http.Header{"X-Cmd-Zdr": []string{"1"}}, false)
 	if zdrHeaders.Get("x-cmd-zdr") != "1" {
 		t.Fatalf("documented ZDR opt-in was not forwarded: %v", zdrHeaders)
 	}
 	for _, value := range []string{"0", "true", "1, 0"} {
-		got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session", http.Header{"X-Cmd-Zdr": []string{value}})
+		got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session", http.Header{"X-Cmd-Zdr": []string{value}}, false)
 		if got.Get("x-cmd-zdr") != "" {
 			t.Errorf("non-canonical ZDR value %q was forwarded as %q", value, got.Get("x-cmd-zdr"))
 		}
@@ -1974,5 +2001,263 @@ func TestStreamCloseCarriesErrorDetail(t *testing.T) {
 	}
 	if !strings.Contains(wire.ErrorDetail.Message, "terminal stop reason") {
 		t.Fatalf("error_detail message lost the cause: %q", wire.ErrorDetail.Message)
+	}
+}
+
+// Batching pin (PR perf/1): one upstream read carrying N complete events
+// must surface as ONE stream_emit RPC — the host deframer splits the framed
+// payload back into events, so batched emission is byte-equivalent to
+// per-event emission while replacing N cgo round trips with one.
+func TestExecuteStreamBatchesEventsIntoOneEmitPerRead(t *testing.T) {
+	event := func(content string) string {
+		return `data: {"id":"c8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"` + content + `"}}]}` + "\n\n"
+	}
+	m, f := newStreamManager(t, streamScript{
+		upstreamID: "up-batch",
+		frames: []string{
+			// One read carrying TWO complete events.
+			event("he") + event("ll"),
+			"data: [DONE]\n\n",
+		},
+	})
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBodyForKeyWithPath("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-batch", testKey, "/v1/chat/completions"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	m.bridge.WaitForInFlight(5 * time.Second)
+	emits := f.callsOf(pluginabi.MethodHostStreamEmit)
+	if len(emits) != 1 {
+		t.Fatalf("emit RPCs = %d, want 1 batched per read", len(emits))
+	}
+	payload := wireBody(t, decodePayload(t, emits[0]), "payload")
+	if got := strings.Count(string(payload), "data: {"); got != 2 {
+		t.Fatalf("batched payload carries %d data frames, want 2:\n%q", got, payload)
+	}
+	if !strings.HasSuffix(string(payload), "\n\n") {
+		t.Fatalf("batched payload must end with a blank line: %q", payload)
+	}
+}
+
+// Claude-format events are synthesized as complete SSE frames; joining them
+// must not change their bytes, and one converted upstream chunk must still
+// be one emit RPC.
+func TestExecuteStreamBatchesClaudeEventsPerRead(t *testing.T) {
+	m, f := newStreamManager(t, streamScript{
+		upstreamID: "up-batch-claude",
+		frames: []string{
+			`data: {"id":"c9","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}` + "\n\n",
+			`data: {"id":"c9","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":"stop"}]}` + "\n\n",
+			"data: [DONE]\n\n",
+		},
+	})
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBodyForKeyWithPath("commandcode/glm-5.3", "claude", []byte(ccRequestBody), "down-batch-claude", testKey, "/v1/messages"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	m.bridge.WaitForInFlight(5 * time.Second)
+	emits := f.callsOf(pluginabi.MethodHostStreamEmit)
+	// One emit per upstream read: the terminal read ([DONE]) carries the
+	// deferred message_delta/message_stop batch the converter held back.
+	if len(emits) != 3 {
+		for i, e := range emits {
+			t.Logf("emit %d: %s", i, wireBody(t, decodePayload(t, e), "payload"))
+		}
+		t.Fatalf("emit RPCs = %d, want 3 (one per upstream read)", len(emits))
+	}
+	var blob strings.Builder
+	for i, e := range emits {
+		payload := wireBody(t, decodePayload(t, e), "payload")
+		if !strings.Contains(string(payload), "event: ") {
+			t.Fatalf("emit %d lost SSE framing: %q", i, payload)
+		}
+		blob.Write(payload)
+	}
+	for _, want := range []string{"message_start", "content_block_delta", "message_stop"} {
+		if !strings.Contains(blob.String(), want) {
+			t.Fatalf("missing %s in batched stream:\n%s", want, blob.String())
+		}
+	}
+}
+
+// Prefetch pin: with the reader goroutine decoupled from the emitter, events
+// must still arrive strictly in upstream order.
+func TestExecuteStreamPrefetchPreservesOrder(t *testing.T) {
+	var frames []string
+	for i := 0; i < 12; i++ {
+		frames = append(frames, `data: {"id":"o1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"t`+strconv.Itoa(i)+`"}}]}`+"\n\n")
+	}
+	m, f := newStreamManager(t, streamScript{upstreamID: "up-order", frames: frames})
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-order"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	m.bridge.WaitForInFlight(5 * time.Second)
+	var blob strings.Builder
+	for _, e := range f.callsOf(pluginabi.MethodHostStreamEmit) {
+		blob.Write(wireBody(t, decodePayload(t, e), "payload"))
+	}
+	for i := 0; i < 12; i++ {
+		if !strings.Contains(blob.String(), `"content":"t`+strconv.Itoa(i)+`"`) {
+			t.Fatalf("event %d missing from stream:\n%s", i, blob.String())
+		}
+	}
+}
+
+// The stream wire request must carry the same Accept/Content-Type pair the
+// native OpenAI-compat executor sends; OpenAI-style gateways and CDNs key
+// response buffering off Accept.
+func TestExecuteStreamWireHeadersIncludeEventStreamAccept(t *testing.T) {
+	m, f := newStreamManager(t, streamScript{upstreamID: "up-hdr", frames: []string{"data: [DONE]\n\n"}})
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-hdr"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	streamWire := decodePayload(t, f.callsOf(pluginabi.MethodHostHTTPDoStream)[0])
+	streamHeaders := streamWire["headers"].(map[string]any)
+	if contentType, _ := streamHeaders["Content-Type"].([]any); len(contentType) == 0 || contentType[0] != "application/json" {
+		t.Fatalf("stream wire Content-Type missing: %v", streamHeaders)
+	}
+	if accept, _ := streamHeaders["Accept"].([]any); len(accept) == 0 || accept[0] != "text/event-stream" {
+		t.Fatalf("stream wire Accept missing: %v", streamHeaders)
+	}
+	if cc, _ := streamHeaders["Cache-Control"].([]any); len(cc) == 0 || cc[0] != "no-cache" {
+		t.Fatalf("stream wire Cache-Control missing: %v", streamHeaders)
+	}
+}
+
+// Cross-format clients (gemini /v1beta, interactions endpoints) make the host
+// translate each downstream CHUNK with no deframer. Batching must stay OFF
+// there: one bare-JSON emit per converted event, exactly like pre-batching.
+func TestExecuteStreamGateSkipsBatchingOnCrossFormatPath(t *testing.T) {
+	event := func(content string) string {
+		return `data: {"id":"cg","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"` + content + `"}}]}` + "\n\n"
+	}
+	m, f := newStreamManager(t, streamScript{
+		upstreamID: "up-xfmt",
+		frames: []string{
+			event("he") + event("ll"),
+			"data: [DONE]\n\n",
+		},
+	})
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBodyForKeyWithPath("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-xfmt", testKey,
+			"/v1beta/models/gemini-x:streamGenerateContent"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	m.bridge.WaitForInFlight(5 * time.Second)
+	emits := f.callsOf(pluginabi.MethodHostStreamEmit)
+	if len(emits) != 2 {
+		t.Fatalf("emit RPCs = %d, want 2 (one bare emit per converted event)", len(emits))
+	}
+	for i, e := range emits {
+		payload := string(wireBody(t, decodePayload(t, e), "payload"))
+		if strings.HasPrefix(payload, "data: ") {
+			t.Fatalf("emit %d must be per-event bare JSON (host has no deframer on this path): %q", i, payload)
+		}
+	}
+}
+
+// Without request-path metadata the plugin has no evidence the host will
+// deframe, so it falls back to per-event emission.
+func TestExecuteStreamGateFallsBackToPerEventWithoutPathMetadata(t *testing.T) {
+	event := `data: {"id":"cn","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"x"}}]}` + "\n\n"
+	m, f := newStreamManager(t, streamScript{
+		upstreamID: "up-nopath",
+		frames:     []string{event + event + "data: [DONE]\n\n"},
+	})
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBody("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-nopath"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	m.bridge.WaitForInFlight(5 * time.Second)
+	emits := f.callsOf(pluginabi.MethodHostStreamEmit)
+	if len(emits) != 2 {
+		t.Fatalf("emit RPCs = %d, want 2 (one bare emit per converted event)", len(emits))
+	}
+	for i, e := range emits {
+		payload := string(wireBody(t, decodePayload(t, e), "payload"))
+		if len(payload) != 0 && strings.HasPrefix(payload, "data: ") {
+			t.Fatalf("emit %d must be per-event bare JSON (no frame evidence): %q", i, payload)
+		}
+	}
+}
+
+// One upstream read carrying events AND [DONE]: all events must emit in that
+// batch before the pump's post-emit done-handling.
+func TestExecuteStreamEventsAndDoneInSameReadBatch(t *testing.T) {
+	event := func(content string) string {
+		return `data: {"id":"cd","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"` + content + `"}}]}` + "\n\n"
+	}
+	m, f := newStreamManager(t, streamScript{
+		upstreamID: "up-donesame",
+		frames: []string{
+			event("a") + event("b") + "data: [DONE]\n\n",
+		},
+	})
+	resp, err := m.HandleCall("executor.execute_stream",
+		execStreamReqBodyForKeyWithPath("commandcode/glm-5.3", "openai", []byte(ccRequestBody), "down-donesame", testKey, "/v1/chat/completions"))
+	if err != nil {
+		t.Fatalf("execute_stream: %v", err)
+	}
+	if env := decodeEnv(t, resp); !env.OK {
+		t.Fatalf("execute_stream envelope = %+v", env.Error)
+	}
+	m.bridge.WaitForInFlight(5 * time.Second)
+	emits := f.callsOf(pluginabi.MethodHostStreamEmit)
+	if len(emits) != 1 {
+		t.Fatalf("emit RPCs = %d, want 1 batched", len(emits))
+	}
+	payload := string(wireBody(t, decodePayload(t, emits[0]), "payload"))
+	for _, want := range []string{`"content":"a"`, `"content":"b"`} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("batched payload missing %q:\n%q", want, payload)
+		}
+	}
+}
+
+// Pin the batchingAllowed gate itself.
+func TestBatchingAllowedGate(t *testing.T) {
+	cases := []struct {
+		format, path string
+		want         bool
+	}{
+		{"openai", "/v1/chat/completions", true},
+		{"openai", "/api/chat/completions", true},
+		{"openai", "/v1beta/models/g:streamGenerateContent", false},
+		{"openai", "/v1/interactions", false},
+		{"openai", "", false},
+		{"claude", "/v1/messages", true},
+		{"claude", "/v1beta/models/g:generateContent", false},
+		{"openai-response", "/v1/responses", true},
+		{"openai-response", "/v1/chat/completions", false},
+	}
+	for _, tc := range cases {
+		if got := batchingAllowed(tc.format, tc.path); got != tc.want {
+			t.Errorf("batchingAllowed(%q, %q) = %t, want %t", tc.format, tc.path, got, tc.want)
+		}
 	}
 }
