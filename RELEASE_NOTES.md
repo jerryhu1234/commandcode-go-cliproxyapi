@@ -1,5 +1,42 @@
 # Release Notes
 
+## Unreleased — Stream pipeline optimization and zero-output guard
+
+- Aligns upstream stream headers with the native OpenAI-compat executor
+  (openai_compat_executor.go): stream requests now send
+  `Accept: text/event-stream` + `Cache-Control: no-cache`; `Content-Type:
+  application/json` is set on every route. OpenAI-style gateways and CDNs key
+  response buffering off Accept, so the missing header could present as
+  server-buffered streams with degraded time-to-first-byte.
+- Batches stream events into a single `stream_emit` RPC per upstream read
+  (`shared.JoinStreamEvents`), replacing N cgo round trips (each with its own
+  goroutine and timer) with one. Strictly GATED on positive host-deframe
+  evidence: only when the executor request metadata `request_path` matches a
+  safe suffix for the same format (openai `/chat/completions`, claude
+  `/messages`, openai-response `/responses`). No path evidence → per-event
+  emission, byte-equivalent to the pre-optimization contract; cross-format
+  clients (gemini, interactions) never batch because the host translates each
+  CHUNK with no deframer there.
+- Adds a prefetch pump: a reader goroutine keeps draining the upstream into a
+  depth-1 buffer while the converter/emitter loop works, removing the
+  read→feed→emit serial window that left the upstream socket un-drained and
+  let back-pressured clients trigger remote throttling. Watchdog/cancel
+  contracts are unchanged; an empty non-terminal read now backs off 5 ms
+  instead of free-spinning.
+- Fixes `max-response-bytes` accounting: buffered (prefetch-channel) bytes
+  are counted atomically toward the cap, closing a ~32 KiB overshoot per
+  stream that the depth-1 buffer previously allowed.
+- Ports the CLIProxyAPI ≥ 8.0.72 zero-output guard (issue #7513): a stream
+  that terminated cleanly (upstream finish terminal + converter done) but
+  carried zero visible output (no text / reasoning / tool-call events) now
+  fails as a retryable 502 (`upstream stream finished with zero visible
+  output`) instead of committing an empty success, so the host conductor can
+  fail over. Inspection is fail-open — unrecognized events/formats always
+  count as visible, so the guard can miss a zero-output but never misfire on
+  legitimate output. Opt-out: `stream-zero-output-fail: false` restores the
+  pre-guard clean-close behavior.
+- Bumped `buildinfo.Version` to 0.2.9 to match the artifact's
+  `v0.2.9-cpa8.6` naming and CPA 8.6 compatibility.
 ## Unreleased — L0 orphan-credential diagnostic
 
 - Reports config-removed credentials at every lifecycle (register /
